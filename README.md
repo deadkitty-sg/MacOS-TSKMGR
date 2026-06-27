@@ -6,7 +6,7 @@
 
 Support for macOS 26, Intel and Silicon hosts.
 
-<img src="Assets/1.png" alt="1" style="zoom:50%;" />
+<img src="Assets/截屏2026-06-28 02.28.40.png" alt="截屏2026-06-28 02.28.40" style="zoom:50%;" />
 
 支持中英文切换 (选项-语言-中/英文)
 
@@ -18,23 +18,21 @@ U can change language whether u want. (SimpCHN or enUS)
 
 Main features: automatic switching between dark and light modes, and an interface and interactions almost identical to Windows 10 Task Manager.
 
-<img src="Assets/截屏2026-06-25 01.43.40.png" alt="截屏2026-06-25 01.43.40" style="zoom: 50%;" />
+<img src="Assets/截屏2026-06-28 02.22.58.png" alt="截屏2026-06-28 02.22.58" style="zoom:50%;" />
 
-<img src="Assets/截屏2026-06-25 01.43.55.png" alt="截屏2026-06-25 01.43.55" style="zoom: 50%;" />
+技术实现路径：
 
-<img src="Assets/截屏2026-06-25 01.44.02.png" alt="截屏2026-06-25 01.44.02" style="zoom: 50%;" />
+- NPU / ANE：当前已从早期 heuristic 估算，改为基于私有 `IOReport` 的实测链路。主要读取 `Energy Model`、`ANS2 Power`、`AMC Stats Perf Counters`，用于生成功耗、活跃度、数据搬运等图形。
+- 散热：新增独立 `散热` 页面，风扇转速主要来自 `AppleSMC`，温度则结合 `SMC`、HID 温度节点以及板级传感器映射，覆盖 CPU、GPU、磁盘、网卡、SoC、主板、电源与外壳等项目。
 
-<img src="Assets/截屏2026-06-25 01.44.08.png" alt="截屏2026-06-25 01.44.08" style="zoom:50%;" />
+Implementation notes:
 
-<img src="Assets/截屏2026-06-25 01.44.15.png" alt="截屏2026-06-25 01.44.15" style="zoom:50%;" />
+- NPU / ANE: the old heuristic path has been replaced by a private `IOReport`-based pipeline. It mainly reads from `Energy Model`, `ANS2 Power`, and `AMC Stats Perf Counters` to drive Power, Activity, and Data Movement graphs.
+- Thermal: a dedicated `Thermal` page has been added. Fan RPM mainly comes from `AppleSMC`, while temperatures are collected through `SMC`, HID temperature nodes, and board-level sensor mappings for CPU, GPU, disk, Wi-Fi, SoC, logic board, power, and enclosure.
 
-<img src="Assets/截屏2026-06-25 01.44.21.png" alt="截屏2026-06-25 01.44.21" style="zoom:50%;" />
+<img src="Assets/截屏2026-06-28 02.24.08.png" alt="截屏2026-06-28 02.24.08" style="zoom:50%;" />
 
-说明：NPU 页面的性能曲线 是结合 ANE (Apple Neural Engine) 可读取的 neural footprint 的变化趋势结合CPU、GPU整体利用率加权出来的估算值。(我不知道这样估算是否合理以及有什么依据，但是图一乐嘛)
-
-Note: The performance curve on the NPU page is an estimated value derived by combining the trend of the neural footprint readable by the ANE (Apple Neural Engine) with the overall utilization of the CPU and GPU. (I don’t know if this estimation is reasonable or what the basis is, but it looks fun in the chart)
-
-<img src="Assets/截屏2026-06-25 01.46.15.png" alt="截屏2026-06-25 01.46.15" style="zoom:50%;" />
+<img src="Assets/截屏2026-06-28 02.25.22.png" alt="截屏2026-06-28 02.25.22" style="zoom:50%;" />
 
 最后，这只是一个初始工程，不打算一直更新。
 

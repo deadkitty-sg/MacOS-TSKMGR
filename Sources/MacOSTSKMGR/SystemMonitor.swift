@@ -9,11 +9,596 @@ import IOKit.storage
 import CoreFoundation
 import CoreWLAN
 
+@_silgen_name("CFRelease")
+private func CFReleaseShim(_ cf: CFTypeRef?)
+
+@_silgen_name("mach_task_self")
+private func mach_task_self_() -> UInt32
+@_silgen_name("IOServiceOpen")
+private func IOServiceOpen_(_ service: io_service_t, _ owningTask: UInt32, _ type: UInt32, _ connect: UnsafeMutablePointer<UInt32>) -> kern_return_t
+@_silgen_name("IOServiceClose")
+private func IOServiceClose_(_ connect: UInt32) -> kern_return_t
+@_silgen_name("IOConnectCallStructMethod")
+private func IOConnectCallStructMethod_(_ conn: UInt32, _ selector: UInt32, _ input: UnsafeRawPointer, _ inputSize: Int, _ output: UnsafeMutableRawPointer, _ outputSize: UnsafeMutablePointer<Int>) -> kern_return_t
+@_silgen_name("IOHIDEventSystemClientCreate")
+private func IOHIDEventSystemClientCreate(_ allocator: CFAllocator?) -> UnsafeMutableRawPointer?
+@_silgen_name("IOHIDEventSystemClientSetMatching")
+private func IOHIDEventSystemClientSetMatching(_ client: UnsafeMutableRawPointer, _ matching: CFDictionary) -> Int32
+@_silgen_name("IOHIDEventSystemClientCopyServices")
+private func IOHIDEventSystemClientCopyServices(_ client: UnsafeMutableRawPointer) -> Unmanaged<CFArray>?
+@_silgen_name("IOHIDServiceClientCopyProperty")
+private func IOHIDServiceClientCopyProperty(_ service: UnsafeRawPointer, _ key: CFString) -> Unmanaged<CFTypeRef>?
+@_silgen_name("IOHIDServiceClientCopyEvent")
+private func IOHIDServiceClientCopyEvent(_ service: UnsafeRawPointer, _ type: Int64, _ field: Int32, _ options: Int64) -> UnsafeMutableRawPointer?
+@_silgen_name("IOHIDEventGetFloatValue")
+private func IOHIDEventGetFloatValue(_ event: UnsafeMutableRawPointer, _ field: Int64) -> Double
+
+private struct SMCKeyDataVer {
+    var major: UInt8 = 0
+    var minor: UInt8 = 0
+    var build: UInt8 = 0
+    var reserved: UInt8 = 0
+    var release: UInt16 = 0
+}
+
+private struct SMCPLimitData {
+    var version: UInt16 = 0
+    var length: UInt16 = 0
+    var cpuPowerLimit: UInt32 = 0
+    var gpuPowerLimit: UInt32 = 0
+    var memPowerLimit: UInt32 = 0
+}
+
+private struct SMCKeyInfo {
+    var dataSize: UInt32 = 0
+    var dataType: UInt32 = 0
+    var dataAttributes: UInt8 = 0
+    var padding0: UInt8 = 0
+    var padding1: UInt8 = 0
+    var padding2: UInt8 = 0
+}
+
+private struct SMCKeyData {
+    var key: UInt32 = 0
+    var vers = SMCKeyDataVer()
+    var versPadding: UInt16 = 0
+    var pLimitData = SMCPLimitData()
+    var keyInfo = SMCKeyInfo()
+    var result: UInt8 = 0
+    var status: UInt8 = 0
+    var data8: UInt8 = 0
+    var data8Padding: UInt8 = 0
+    var data32: UInt32 = 0
+    var bytes: (
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+    ) = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+}
+
+private final class SMCReader {
+    private let connection: UInt32
+
+    init?() {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleSMC"), &iterator) == KERN_SUCCESS else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var conn: UInt32 = 0
+        while true {
+            let service = IOIteratorNext(iterator)
+            if service == 0 { break }
+            defer { IOObjectRelease(service) }
+
+            var name = [CChar](repeating: 0, count: 128)
+            guard IORegistryEntryGetName(service, &name) == KERN_SUCCESS else { continue }
+            let serviceName = String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            if serviceName == "AppleSMCKeysEndpoint" {
+                let kr = IOServiceOpen_(service, mach_task_self_(), 0, &conn)
+                if kr == KERN_SUCCESS {
+                    break
+                }
+            }
+        }
+
+        guard conn != 0 else { return nil }
+        self.connection = conn
+    }
+
+    deinit {
+        _ = IOServiceClose_(connection)
+    }
+
+    func readAllKeys() -> [String] {
+        guard let count = keyCount(), count > 0 else { return [] }
+        var result: [String] = []
+        result.reserveCapacity(Int(count))
+        for index in 0..<count {
+            if let key = keyByIndex(index) {
+                result.append(key)
+            }
+        }
+        return result
+    }
+
+    func readFloatValue(for key: String) -> Double? {
+        guard let (type, data) = readValue(for: key), type == "flt ", data.count >= 4 else { return nil }
+        let bits = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        return Double(Float(bitPattern: UInt32(littleEndian: bits)))
+    }
+
+    func readNumericValue(for key: String) -> Double? {
+        guard let (type, data) = readValue(for: key) else { return nil }
+        switch type {
+        case "flt ":
+            guard data.count >= 4 else { return nil }
+            let bits = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            return Double(Float(bitPattern: UInt32(littleEndian: bits)))
+        case "fpe2":
+            guard data.count >= 2 else { return nil }
+            return Double((UInt16(data[0]) << 6) | (UInt16(data[1]) >> 2))
+        case "ui8 ":
+            return data.isEmpty ? nil : Double(data[0])
+        case "ui16":
+            guard data.count >= 2 else { return nil }
+            return Double(UInt16(data[0]) << 8 | UInt16(data[1]))
+        case "ui32":
+            guard data.count >= 4 else { return nil }
+            return Double(UInt32(data[0]) << 24 | UInt32(data[1]) << 16 | UInt32(data[2]) << 8 | UInt32(data[3]))
+        default:
+            return nil
+        }
+    }
+
+    private func parseKey(_ key: String) -> UInt32 {
+        key.utf8.reduce(0) { ($0 << 8) + UInt32($1) }
+    }
+
+    private func fourCC(_ value: UInt32) -> String {
+        let bigEndian = value.bigEndian
+        return withUnsafeBytes(of: bigEndian) { String(bytes: $0, encoding: .utf8) ?? "" }
+    }
+
+    private func call(_ input: inout SMCKeyData) -> SMCKeyData? {
+        var output = SMCKeyData()
+        var outSize = MemoryLayout<SMCKeyData>.stride
+        let kr = withUnsafePointer(to: &input) { ip in
+            withUnsafeMutablePointer(to: &output) { op in
+                IOConnectCallStructMethod_(connection, 2, ip, MemoryLayout<SMCKeyData>.stride, op, &outSize)
+            }
+        }
+        guard kr == KERN_SUCCESS, output.result == 0 else { return nil }
+        return output
+    }
+
+    private func keyInfo(for key: String) -> SMCKeyInfo? {
+        var request = SMCKeyData()
+        request.key = parseKey(key)
+        request.data8 = 9
+        return call(&request)?.keyInfo
+    }
+
+    private func readValue(for key: String) -> (String, [UInt8])? {
+        guard let info = keyInfo(for: key) else { return nil }
+        var request = SMCKeyData()
+        request.key = parseKey(key)
+        request.data8 = 5
+        request.keyInfo = info
+        guard let output = call(&request) else { return nil }
+        let bytes = withUnsafeBytes(of: output.bytes) { Array($0.prefix(Int(info.dataSize))) }
+        return (fourCC(info.dataType), bytes)
+    }
+
+    private func keyCount() -> UInt32? {
+        guard let (_, data) = readValue(for: "#KEY"), data.count >= 4 else { return nil }
+        return data.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+
+    private func keyByIndex(_ index: UInt32) -> String? {
+        var request = SMCKeyData()
+        request.data8 = 8
+        request.data32 = index
+        guard let output = call(&request) else { return nil }
+        return fourCC(output.key)
+    }
+}
+
+private enum IOReportRuntime {
+    typealias CopyAllChannelsFn = @convention(c) (UInt64, UInt64) -> Unmanaged<CFDictionary>?
+    typealias CreateSubscriptionFn = @convention(c) (
+        UnsafeRawPointer?,
+        CFMutableDictionary,
+        UnsafeMutablePointer<Unmanaged<CFMutableDictionary>?>?,
+        UInt64,
+        UnsafeRawPointer?
+    ) -> UnsafeRawPointer?
+    typealias CreateSamplesFn = @convention(c) (UnsafeRawPointer, CFMutableDictionary, UnsafeRawPointer?) -> Unmanaged<CFDictionary>?
+    typealias CreateSamplesDeltaFn = @convention(c) (CFDictionary, CFDictionary, UnsafeRawPointer?) -> Unmanaged<CFDictionary>?
+    typealias ChannelStringFn = @convention(c) (CFDictionary) -> Unmanaged<CFString>?
+    typealias SimpleIntegerFn = @convention(c) (CFDictionary, Int32) -> Int64
+
+    private struct LibraryHandle: @unchecked Sendable {
+        let raw: UnsafeMutableRawPointer?
+    }
+
+    private static let libraryHandle = LibraryHandle(
+        raw: dlopen("/usr/lib/libIOReport.dylib", RTLD_NOW | RTLD_LOCAL)
+    )
+
+    private static func load<T>(_ symbol: String, as type: T.Type) -> T? {
+        guard let raw = dlsym(libraryHandle.raw, symbol) else {
+            return nil
+        }
+        return unsafeBitCast(raw, to: type)
+    }
+
+    static let copyAllChannels = load("IOReportCopyAllChannels", as: CopyAllChannelsFn.self)
+    static let createSubscription = load("IOReportCreateSubscription", as: CreateSubscriptionFn.self)
+    static let createSamples = load("IOReportCreateSamples", as: CreateSamplesFn.self)
+    static let createSamplesDelta = load("IOReportCreateSamplesDelta", as: CreateSamplesDeltaFn.self)
+    static let channelGetGroup = load("IOReportChannelGetGroup", as: ChannelStringFn.self)
+    static let channelGetSubGroup = load("IOReportChannelGetSubGroup", as: ChannelStringFn.self)
+    static let channelGetChannelName = load("IOReportChannelGetChannelName", as: ChannelStringFn.self)
+    static let channelGetUnitLabel = load("IOReportChannelGetUnitLabel", as: ChannelStringFn.self)
+    static let simpleGetIntegerValue = load("IOReportSimpleGetIntegerValue", as: SimpleIntegerFn.self)
+    static let stateGetCount = load("IOReportStateGetCount", as: (@convention(c) (CFDictionary) -> Int32).self)
+    static let stateGetNameForIndex = load("IOReportStateGetNameForIndex", as: (@convention(c) (CFDictionary, Int32) -> Unmanaged<CFString>?).self)
+    static let stateGetResidency = load("IOReportStateGetResidency", as: (@convention(c) (CFDictionary, Int32) -> Int64).self)
+
+    static var isAvailable: Bool {
+        copyAllChannels != nil &&
+        createSubscription != nil &&
+        createSamples != nil &&
+        createSamplesDelta != nil &&
+        channelGetGroup != nil &&
+        channelGetSubGroup != nil &&
+        channelGetChannelName != nil &&
+        channelGetUnitLabel != nil &&
+        simpleGetIntegerValue != nil
+    }
+}
+
+private struct ANEIOReportChannelMetadata {
+    let group: String
+    let subgroup: String
+    let channel: String
+    let unit: String
+}
+
+private struct ANEIOReportDeltaSample {
+    let activeTimePercent: Double
+    let watts: Double
+    let dataReadBytesPerSecond: UInt64
+    let dataWriteBytesPerSecond: UInt64
+    let dataMovementBytesPerSecond: UInt64
+    let durationMilliseconds: UInt64
+}
+
+private struct ANEIOReportMetrics {
+    let activeTimePercent: Double
+    let watts: Double
+    let dataReadBytesPerSecond: UInt64
+    let dataWriteBytesPerSecond: UInt64
+    let dataMovementBytesPerSecond: UInt64
+}
+
+private final class ANEIOReportSampler: @unchecked Sendable {
+    private let subscription: UnsafeRawPointer
+    private let channels: CFMutableDictionary
+    private let metadata: [ANEIOReportChannelMetadata]
+    private let sourceChannels: CFDictionary
+    private let selectedChannels: CFMutableArray?
+    private var previousSample: (sample: CFDictionary, time: DispatchTime)?
+
+    init?() {
+        guard IOReportRuntime.isAvailable,
+              let copyAllChannels = IOReportRuntime.copyAllChannels,
+              let channelGetGroup = IOReportRuntime.channelGetGroup,
+              let channelGetSubGroup = IOReportRuntime.channelGetSubGroup,
+              let channelGetChannelName = IOReportRuntime.channelGetChannelName,
+              let channelGetUnitLabel = IOReportRuntime.channelGetUnitLabel,
+              let createSubscription = IOReportRuntime.createSubscription,
+              let copiedChannels = copyAllChannels(0, 0)?.takeRetainedValue()
+        else {
+            return nil
+        }
+
+        guard let channelArray = CFDictionaryGetValue(copiedChannels, unsafeBitCast("IOReportChannels" as CFString, to: UnsafeRawPointer.self))
+            .map({ unsafeBitCast($0, to: CFArray.self) })
+        else {
+            return nil
+        }
+
+        let channelCount = CFArrayGetCount(channelArray)
+        guard let mutableChannels = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(copiedChannels), copiedChannels) else {
+            return nil
+        }
+
+        guard let selected = CFArrayCreateMutable(kCFAllocatorDefault, channelCount, nil) else {
+            return nil
+        }
+        var metadata: [ANEIOReportChannelMetadata] = []
+        metadata.reserveCapacity(channelCount)
+
+        for index in 0..<channelCount {
+            let rawItem = CFArrayGetValueAtIndex(channelArray, index)
+            let item = unsafeBitCast(rawItem, to: CFDictionary.self)
+            let group = Self.cfString(channelGetGroup(item)?.takeUnretainedValue())
+            let subgroup = Self.cfString(channelGetSubGroup(item)?.takeUnretainedValue())
+            let channel = Self.cfString(channelGetChannelName(item)?.takeUnretainedValue())
+            let unit = Self.cfString(channelGetUnitLabel(item)?.takeUnretainedValue()).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard Self.matches(group: group, subgroup: subgroup, channel: channel, unit: unit) else {
+                continue
+            }
+
+            CFArrayAppendValue(selected, rawItem)
+            metadata.append(ANEIOReportChannelMetadata(group: group, subgroup: subgroup, channel: channel, unit: unit))
+        }
+
+        guard !metadata.isEmpty else {
+            return nil
+        }
+
+        let key = unsafeBitCast("IOReportChannels" as CFString, to: UnsafeRawPointer.self)
+        CFDictionarySetValue(mutableChannels, key, unsafeBitCast(selected, to: UnsafeRawPointer.self))
+
+        var subscriptionChannels: Unmanaged<CFMutableDictionary>?
+        guard let subscription = createSubscription(nil, mutableChannels, &subscriptionChannels, 0, nil) else {
+            return nil
+        }
+
+        self.subscription = subscription
+        self.channels = mutableChannels
+        self.metadata = metadata
+        self.sourceChannels = copiedChannels
+        self.selectedChannels = selected
+    }
+
+    deinit {
+        CFReleaseShim(unsafeBitCast(subscription, to: CFTypeRef.self))
+    }
+
+    func warmUp() {
+        guard previousSample == nil else { return }
+        previousSample = rawSample()
+    }
+
+    func sampleMetrics(durationMilliseconds: UInt64, count: Int) -> ANEIOReportMetrics {
+        let requestedCount = max(1, min(count, 16))
+        if previousSample == nil {
+            previousSample = rawSample()
+        }
+
+        guard var previous = previousSample else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+        previousSample = nil
+        let startedAt = previous.time
+        var samples: [ANEIOReportDeltaSample] = []
+        samples.reserveCapacity(requestedCount)
+
+        for index in 1...requestedCount {
+            let targetMilliseconds = durationMilliseconds * UInt64(index) / UInt64(requestedCount)
+            let targetTime = startedAt + .milliseconds(Int(targetMilliseconds))
+            let now = DispatchTime.now()
+            if targetTime > now {
+                let deltaNanoseconds = Int(targetTime.uptimeNanoseconds - now.uptimeNanoseconds)
+                if deltaNanoseconds > 0 {
+                    usleep(useconds_t(min(deltaNanoseconds / 1_000, Int(UInt32.max))))
+                }
+            }
+
+            let next = rawSample()
+            let elapsedNanoseconds = next.time.uptimeNanoseconds - previous.time.uptimeNanoseconds
+            let elapsedMilliseconds = max(UInt64(elapsedNanoseconds / 1_000_000), 1)
+
+            if let createSamplesDelta = IOReportRuntime.createSamplesDelta,
+               let delta = createSamplesDelta(previous.sample, next.sample, nil)?.takeRetainedValue() {
+                let metrics = Self.extractANEMetrics(from: delta, metadata: metadata, durationMilliseconds: elapsedMilliseconds)
+                samples.append(ANEIOReportDeltaSample(
+                    activeTimePercent: metrics.activeTimePercent,
+                    watts: metrics.watts,
+                    dataReadBytesPerSecond: metrics.dataReadBytesPerSecond,
+                    dataWriteBytesPerSecond: metrics.dataWriteBytesPerSecond,
+                    dataMovementBytesPerSecond: metrics.dataMovementBytesPerSecond,
+                    durationMilliseconds: elapsedMilliseconds
+                ))
+            }
+
+            previous = next
+        }
+
+        previousSample = previous
+        guard !samples.isEmpty else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+
+        let totalWatts = samples.reduce(0.0) { $0 + $1.watts }
+        let totalActive = samples.reduce(0.0) { $0 + $1.activeTimePercent }
+        let totalRead = samples.reduce(0) { $0 + UInt64($1.dataReadBytesPerSecond) }
+        let totalWrite = samples.reduce(0) { $0 + UInt64($1.dataWriteBytesPerSecond) }
+        let totalMovement = samples.reduce(0) { $0 + UInt64($1.dataMovementBytesPerSecond) }
+        let divisor = UInt64(samples.count)
+        return ANEIOReportMetrics(
+            activeTimePercent: totalActive / Double(samples.count),
+            watts: totalWatts / Double(samples.count),
+            dataReadBytesPerSecond: totalRead / divisor,
+            dataWriteBytesPerSecond: totalWrite / divisor,
+            dataMovementBytesPerSecond: totalMovement / divisor
+        )
+    }
+
+    private func rawSample() -> (sample: CFDictionary, time: DispatchTime) {
+        guard let createSamples = IOReportRuntime.createSamples,
+              let sample = createSamples(subscription, channels, nil)?.takeRetainedValue()
+        else {
+            fatalError("IOReport runtime became unavailable after sampler initialization")
+        }
+        return (sample, .now())
+    }
+
+    private static func matches(group: String, subgroup: String, channel: String, unit: String) -> Bool {
+        if group == "Energy Model" {
+            guard unit == "mJ" || unit == "uJ" || unit == "nJ" else { return false }
+            if channel == "GPU Energy" { return false }
+            if channel.hasSuffix("CPU Energy") { return false }
+            if channel.hasPrefix("DRAM") { return false }
+            if channel.hasPrefix("GPU SRAM") { return false }
+            return channel.hasPrefix("ANE")
+        }
+
+        if group == "AMC Stats", subgroup == "Perf Counters" {
+            return channel == "ANE DCS RD"
+                || channel == "ANE DCS WR"
+                || channel == "ANE NRT AF RD"
+                || channel == "ANE NRT AF WR"
+        }
+
+        if group == "ANS2", subgroup == "Power", channel == "Duty cycle" {
+            return true
+        }
+
+        if group == "ANS2", subgroup == "Power", channel == "Power state" {
+            return true
+        }
+
+        return false
+    }
+
+    private static func extractANEMetrics(from sample: CFDictionary, metadata: [ANEIOReportChannelMetadata], durationMilliseconds: UInt64) -> ANEIOReportMetrics {
+        guard durationMilliseconds > 0 else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+        guard let simpleGetIntegerValue = IOReportRuntime.simpleGetIntegerValue else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+        guard let rawChannels = CFDictionaryGetValue(sample, unsafeBitCast("IOReportChannels" as CFString, to: UnsafeRawPointer.self)) else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+
+        let channels = unsafeBitCast(rawChannels, to: CFArray.self)
+        let count = min(CFArrayGetCount(channels), metadata.count)
+        guard count > 0 else {
+            return ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
+        }
+
+        var watts = 0.0
+        var activeTimePercent = 0.0
+        var dataReadBytesPerSecond: UInt64 = 0
+        var dataWriteBytesPerSecond: UInt64 = 0
+        let seconds = Double(durationMilliseconds) / 1000.0
+        for index in 0..<count {
+            let item = unsafeBitCast(CFArrayGetValueAtIndex(channels, index), to: CFDictionary.self)
+            let meta = metadata[index]
+            if meta.group == "Energy Model", meta.channel.hasPrefix("ANE") {
+                let energy = Double(simpleGetIntegerValue(item, 0))
+                switch meta.unit {
+                case "mJ":
+                    watts += (energy / 1_000.0) / seconds
+                case "uJ":
+                    watts += (energy / 1_000_000.0) / seconds
+                case "nJ":
+                    watts += (energy / 1_000_000_000.0) / seconds
+                default:
+                    break
+                }
+                continue
+            }
+
+            if meta.group == "AMC Stats", meta.subgroup == "Perf Counters" {
+                let bytes = max(simpleGetIntegerValue(item, 0), 0)
+                let bytesPerSecond = UInt64(Double(bytes) / seconds)
+                switch meta.channel {
+                case "ANE DCS RD", "ANE NRT AF RD":
+                    dataReadBytesPerSecond += bytesPerSecond
+                case "ANE DCS WR", "ANE NRT AF WR":
+                    dataWriteBytesPerSecond += bytesPerSecond
+                default:
+                    break
+                }
+                continue
+            }
+
+            if meta.group == "ANS2", meta.subgroup == "Power", meta.channel == "Duty cycle" {
+                let duty = Double(max(simpleGetIntegerValue(item, 0), 0))
+                activeTimePercent = max(activeTimePercent, min(duty, 100))
+                continue
+            }
+
+            if meta.group == "ANS2", meta.subgroup == "Power", meta.channel == "Power state" {
+                let onResidency = onResidencyDelta(from: item)
+                if onResidency > 0 {
+                    let percent = min(max(Double(onResidency) / Double(durationMilliseconds * 1_000) * 100.0, 0), 100)
+                    activeTimePercent = max(activeTimePercent, percent)
+                }
+            }
+        }
+
+        let totalMovement = dataReadBytesPerSecond + dataWriteBytesPerSecond
+        let normalizedActiveTime = normalizeANEActiveTime(
+            rawPercent: activeTimePercent,
+            watts: watts,
+            movementBytesPerSecond: totalMovement
+        )
+        return ANEIOReportMetrics(
+            activeTimePercent: normalizedActiveTime,
+            watts: max(watts, 0),
+            dataReadBytesPerSecond: dataReadBytesPerSecond,
+            dataWriteBytesPerSecond: dataWriteBytesPerSecond,
+            dataMovementBytesPerSecond: totalMovement
+        )
+    }
+
+    private static func normalizeANEActiveTime(rawPercent: Double, watts: Double, movementBytesPerSecond: UInt64) -> Double {
+        let clamped = min(max(rawPercent, 0), 100)
+        if clamped < 1, watts < 0.05 && movementBytesPerSecond < 4 * 1024 {
+            return 0
+        }
+        if clamped <= 10 {
+            return clamped * 0.35
+        }
+        if clamped <= 40 {
+            return 3.5 + (clamped - 10) * 0.7
+        }
+        return min(24.5 + (clamped - 40) * 0.9, 100)
+    }
+
+    private static func onResidencyDelta(from item: CFDictionary) -> Int64 {
+        guard let getCount = IOReportRuntime.stateGetCount,
+              let getName = IOReportRuntime.stateGetNameForIndex,
+              let getResidency = IOReportRuntime.stateGetResidency
+        else {
+            return 0
+        }
+
+        let count = getCount(item)
+        guard count > 0 else { return 0 }
+        for index in 0..<count {
+            let name = cfString(getName(item, index)?.takeUnretainedValue())
+            if name == "ON" {
+                return max(getResidency(item, index), 0)
+            }
+        }
+        return 0
+    }
+
+    private static func cfString(_ value: CFString?) -> String {
+        guard let value else { return "" }
+        return value as String
+    }
+}
+
 @MainActor
 final class SystemMonitor: ObservableObject {
     @Published var language: AppLanguage = .chinese
+    @Published var temperatureUnit: TemperatureUnit = .celsius
     @Published private(set) var cpu = CPUState()
     @Published private(set) var memory = MemoryState()
+    @Published private(set) var thermal = ThermalState()
     @Published private(set) var disks: [DiskState] = []
     @Published private(set) var networks: [NetworkState] = []
     @Published private(set) var npus: [NPUState] = []
@@ -26,6 +611,7 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var detailProcessRows: [DetailProcessRowData] = []
     @Published private(set) var serviceRows: [ServiceRowData] = []
     @Published var refreshSpeed: RefreshSpeedOption = .normal
+    @Published private(set) var isTemporarilyPaused = false
 
     private var timer: Timer?
     private var previousTotalCPUTime: UInt64 = 0
@@ -40,6 +626,7 @@ final class SystemMonitor: ObservableObject {
     private var appHistoryMeteredNetworkBaseline: [Int32: UInt64] = [:]
     private var previousDiskCounters: [String: (read: UInt64, write: UInt64, readOps: UInt64, writeOps: UInt64, readTimeNs: UInt64, writeTimeNs: UInt64)] = [:]
     private var previousNetworkCounters: [String: (in: UInt64, out: UInt64)] = [:]
+    private var aneIOReportSampler: ANEIOReportSampler?
     private var lastSampleDate = Date()
     private let hostPort = mach_host_self()
     private let pageSize: UInt64
@@ -51,6 +638,14 @@ final class SystemMonitor: ObservableObject {
     private var legacyCachePairs: [InfoPair] = []
     private var rootWholeDiskID: String?
     private var hardwarePortMap: [String: String] = [:]
+    private var thermalSMCReader: SMCReader?
+    private var thermalFanActualKeys: [String] = []
+    private var thermalFanMaxKeys: [String] = []
+    private var thermalCPUTempKeys: [String] = []
+    private var thermalGPUTempKeys: [String] = []
+    private var cachedDiskTemperatureCelsius: Double?
+    private var lastThermalRefreshDate: Date = .distantPast
+    private var lastThermalDiskProbeDate: Date = .distantPast
     private var lastServicesRefreshDate: Date = .distantPast
     private var disabledLaunchdByGroup: [String: Set<String>] = [:]
     private var aneInfoCache: ANEDeviceInfo?
@@ -75,6 +670,7 @@ final class SystemMonitor: ObservableObject {
         self.pageSize = UInt64(pageSizeValue)
         bootstrapStaticInfo()
         rootWholeDiskID = MonitorProbe.rootWholeDiskIdentifierFromMountedRoot()
+        configureANEIOReportIfNeeded()
     }
 
     func start() {
@@ -82,6 +678,12 @@ final class SystemMonitor: ObservableObject {
         hasStarted = true
         refresh()
         configureTimer()
+    }
+
+    private func configureANEIOReportIfNeeded() {
+        guard aneIOReportSampler == nil else { return }
+        aneIOReportSampler = ANEIOReportSampler()
+        aneIOReportSampler?.warmUp()
     }
 
     var sidebarItems: [PerfSidebarItem] {
@@ -107,10 +709,12 @@ final class SystemMonitor: ObservableObject {
         ]
 
         items.append(contentsOf: disks.map { disk in
-            PerfSidebarItem(
+            let diskKind = diskKindDisplayText(disk.kindLabel)
+            let subtitle = disk.subtitle.isEmpty ? "(\(diskKind))" : "\(disk.subtitle) (\(diskKind))"
+            return PerfSidebarItem(
                 id: .disk(disk.id),
                 title: disk.title,
-                subtitle: disk.subtitle,
+                subtitle: subtitle,
                 tertiary: DisplayFormat.percent(disk.activityPercent),
                 accent: Color(red: 0.44, green: 0.77, blue: 0.10),
                 sparkline: disk.activityHistory,
@@ -119,10 +723,11 @@ final class SystemMonitor: ObservableObject {
         })
 
         items.append(contentsOf: networks.map { network in
-            PerfSidebarItem(
+            let subtitle = language.isChinese && network.subtitle == "Wi-Fi" ? "WLAN" : network.subtitle
+            return PerfSidebarItem(
                 id: .network(network.id),
                 title: network.displayName,
-                subtitle: network.subtitle,
+                subtitle: subtitle,
                 tertiary: language.text("发送: ", "Send: ") + "\(DisplayFormat.networkRate(network.sendBytesPerSecond)) " + language.text("接收: ", "Recv: ") + DisplayFormat.networkRate(network.receiveBytesPerSecond),
                 accent: Color(red: 0.85, green: 0.46, blue: 0.08),
                 sparkline: network.totalHistory,
@@ -131,13 +736,16 @@ final class SystemMonitor: ObservableObject {
         })
 
         items.append(contentsOf: npus.map { npu in
-            PerfSidebarItem(
+            return PerfSidebarItem(
                 id: .npu(npu.id),
                 title: npu.title,
                 subtitle: npu.subtitle,
-                tertiary: DisplayFormat.percent(npu.utilizationPercent),
+                tertiary: DisplayFormat.watts(npu.powerWatts),
                 accent: Color(red: 0.96, green: 0.26, blue: 0.26),
-                sparkline: npu.historyCompute,
+                sparkline: npu.historyPowerWatts.map {
+                    let ceiling = max(npu.peakPowerWatts, 0.5)
+                    return min($0 / ceiling * 100.0, 100.0)
+                },
                 selectedFill: Color(red: 0.62, green: 0.82, blue: 1.0).opacity(0.45)
             )
         })
@@ -153,6 +761,18 @@ final class SystemMonitor: ObservableObject {
                 selectedFill: Color(red: 0.62, green: 0.82, blue: 1.0).opacity(0.45)
             )
         })
+
+        items.append(
+            PerfSidebarItem(
+                id: .thermal,
+                title: language.text("散热", "Thermal"),
+                subtitle: thermal.subtitle,
+                tertiary: thermal.statusText,
+                accent: Color(red: 0.33, green: 0.73, blue: 0.25),
+                sparkline: thermal.historyFanRPM.map { min($0 / max(thermal.fanChartCeilingRPM, 1) * 100.0, 100.0) },
+                selectedFill: Color(red: 0.62, green: 0.82, blue: 1.0).opacity(0.45)
+            )
+        )
 
         return items
     }
@@ -175,6 +795,8 @@ final class SystemMonitor: ObservableObject {
         case .gpu(let id):
             guard let gpu = gpus.first(where: { $0.id == id }) else { return nil }
             return gpuDetail(gpu)
+        case .thermal:
+            return thermalDetail()
         }
     }
 
@@ -191,6 +813,7 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func refresh() {
+        guard !isTemporarilyPaused else { return }
         let now = Date()
         let interval = max(now.timeIntervalSince(lastSampleDate), 0.4)
         lastSampleDate = now
@@ -201,6 +824,7 @@ final class SystemMonitor: ObservableObject {
         refreshNetworks(interval: interval)
         refreshNPUs()
         refreshGPUs()
+        refreshThermal(interval: interval)
         refreshProcesses(interval: interval)
         refreshAppHistory()
         refreshStartupItems()
@@ -231,6 +855,15 @@ final class SystemMonitor: ObservableObject {
     func setRefreshSpeed(_ speed: RefreshSpeedOption) {
         refreshSpeed = speed
         configureTimer()
+    }
+
+    func setTemporarilyPaused(_ paused: Bool) {
+        guard isTemporarilyPaused != paused else { return }
+        isTemporarilyPaused = paused
+        if !paused {
+            lastSampleDate = Date()
+            refresh()
+        }
     }
 
     nonisolated func currentBootSeconds() -> Double {
@@ -343,17 +976,22 @@ final class SystemMonitor: ObservableObject {
 
         let aneInfo = aneInfoCache
         let previousNPU = npus.first
-        let cpuUtilization = cpu.utilizationPercent
-        let gpuUtilization = gpus.first?.utilizationPercent ?? 0
         let totalMemory = memory.totalBytes
+        let samplingDurationMilliseconds = max(UInt64((minimumInterval * 1000).rounded()), 500)
+        let aneSampler = aneIOReportSampler
         lastNPUUsageProbeDate = now
         npuUsageProbeTask = Task.detached(priority: .utility) {
+            let aneMetrics = aneSampler?.sampleMetrics(durationMilliseconds: samplingDurationMilliseconds, count: 4)
+                ?? ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
             let nextNPU = MonitorProbe.collectNPUState(
                 previous: previousNPU,
                 aneInfo: aneInfo,
-                cpuUtilization: cpuUtilization,
-                gpuUtilization: gpuUtilization,
-                totalMemory: totalMemory
+                totalMemory: totalMemory,
+                activeTimePercent: aneMetrics.activeTimePercent,
+                powerWatts: aneMetrics.watts,
+                dataReadBytesPerSecond: aneMetrics.dataReadBytesPerSecond,
+                dataWriteBytesPerSecond: aneMetrics.dataWriteBytesPerSecond,
+                dataMovementBytesPerSecond: aneMetrics.dataMovementBytesPerSecond
             )
             await MainActor.run {
                 self.npus = nextNPU.map { [$0] } ?? []
@@ -851,6 +1489,10 @@ final class SystemMonitor: ObservableObject {
             sidebarHistory = shifted(sidebarHistory, adding: min(combined / chartCeiling * 100.0, 100.0))
             var detailHistory = previousState?.detailHistory ?? Array(repeating: 0, count: 60)
             detailHistory = shifted(detailHistory, adding: combined)
+            var sendHistory = previousState?.sendHistory ?? Array(repeating: 0, count: 60)
+            sendHistory = shifted(sendHistory, adding: Double(sample.send))
+            var receiveHistory = previousState?.receiveHistory ?? Array(repeating: 0, count: 60)
+            receiveHistory = shifted(receiveHistory, adding: Double(sample.receive))
 
             return NetworkState(
                 id: id,
@@ -877,6 +1519,8 @@ final class SystemMonitor: ObservableObject {
                 statusText: networkStatusText(for: sample.representative),
                 totalHistory: sidebarHistory,
                 detailHistory: detailHistory,
+                sendHistory: sendHistory,
+                receiveHistory: receiveHistory,
                 chartCeilingBytesPerSecond: chartCeiling
             )
         }
@@ -916,6 +1560,10 @@ final class SystemMonitor: ObservableObject {
 
             var history = previousStates[item.id]?.activityHistory ?? Array(repeating: 0, count: 60)
             history = shifted(history, adding: activityPercent)
+            var readHistory = previousStates[item.id]?.readHistory ?? Array(repeating: 0, count: 60)
+            readHistory = shifted(readHistory, adding: Double(readPerSec))
+            var writeHistory = previousStates[item.id]?.writeHistory ?? Array(repeating: 0, count: 60)
+            writeHistory = shifted(writeHistory, adding: Double(writePerSec))
             var transferHistory = previousStates[item.id]?.transferHistory ?? Array(repeating: 0, count: 60)
             transferHistory = shifted(transferHistory, adding: Double(throughput))
             let transferCeiling = smoothedDynamicCeiling(
@@ -938,6 +1586,8 @@ final class SystemMonitor: ObservableObject {
                 readBytesPerSecond: readPerSec,
                 writeBytesPerSecond: writePerSec,
                 activityHistory: history,
+                readHistory: readHistory,
+                writeHistory: writeHistory,
                 transferHistory: transferHistory,
                 transferChartCeilingBytesPerSecond: transferCeiling
             ))
@@ -945,6 +1595,48 @@ final class SystemMonitor: ObservableObject {
 
         previousDiskCounters = nextCounters
         disks = updated.sorted { $0.id < $1.id }
+    }
+
+    private func refreshThermal(interval: TimeInterval) {
+        guard Date().timeIntervalSince(lastThermalRefreshDate) >= 2 else { return }
+        lastThermalRefreshDate = Date()
+        let snapshot = collectThermalSnapshot()
+        let fanRPM = snapshot.currentFanRPM
+        thermal.currentFanRPM = fanRPM
+        thermal.peakFanRPM = max(thermal.peakFanRPM, fanRPM)
+        thermal.maximumFanRPM = snapshot.maximumFanRPM
+        thermal.cpuTemperatureCelsius = snapshot.cpuTemperatureCelsius
+        thermal.efficiencyCoreTemperatureCelsius = snapshot.efficiencyCoreTemperatureCelsius
+        thermal.performanceCoreTemperatureCelsius = snapshot.performanceCoreTemperatureCelsius
+        thermal.gpuTemperatureCelsius = snapshot.gpuTemperatureCelsius
+        thermal.diskTemperatureCelsius = snapshot.diskTemperatureCelsius
+        thermal.networkTemperatureCelsius = snapshot.networkTemperatureCelsius
+        thermal.logicBoardTemperatureCelsius = snapshot.logicBoardTemperatureCelsius
+        thermal.socTemperatureCelsius = snapshot.socTemperatureCelsius
+        thermal.powerSupplyTemperatureCelsius = snapshot.powerSupplyTemperatureCelsius
+        thermal.powerSurfaceTemperatureCelsius = snapshot.powerSurfaceTemperatureCelsius
+        thermal.enclosureTemperatureCelsius = snapshot.enclosureTemperatureCelsius
+        thermal.systemTemperatureCelsius = snapshot.systemTemperatureCelsius
+        thermal.subtitle = thermalSubtitle(from: snapshot)
+        thermal.statusText = thermalStatusText(
+            currentFanRPM: fanRPM,
+            systemTemperatureCelsius: snapshot.systemTemperatureCelsius,
+            cpuTemperatureCelsius: snapshot.cpuTemperatureCelsius,
+            gpuTemperatureCelsius: snapshot.gpuTemperatureCelsius
+        )
+        thermal.historyFanRPM = shifted(thermal.historyFanRPM, adding: Double(fanRPM))
+        thermal.fanChartCeilingRPM = Double(max(snapshot.maximumFanRPM, 1000))
+        thermal.historyNetworkTemperatureCelsius = shifted(
+            thermal.historyNetworkTemperatureCelsius,
+            adding: snapshot.networkTemperatureCelsius ?? 0
+        )
+        if let networkTemperature = snapshot.networkTemperatureCelsius {
+            thermal.networkTemperatureChartCeilingCelsius = smoothedDynamicCeiling(
+                previous: thermal.networkTemperatureChartCeilingCelsius,
+                latest: networkTemperature,
+                minimum: 40
+            )
+        }
     }
 
     private func cpuDetail() -> PerformanceDetailViewData {
@@ -1067,7 +1759,8 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func diskDetail(_ disk: DiskState) -> PerformanceDetailViewData {
-        PerformanceDetailViewData(
+        let diskKind = diskKindDisplayText(disk.kindLabel)
+        return PerformanceDetailViewData(
             title: disk.title,
             topRight: disk.modelName,
             ceilingLabel: "100%",
@@ -1078,7 +1771,7 @@ final class SystemMonitor: ObservableObject {
             lowerChart: disk.transferHistory,
             lowerChartValueCeiling: max(disk.transferChartCeilingBytesPerSecond, 1),
             lowerChartCeiling: DisplayFormat.throughput(UInt64(max(disk.transferChartCeilingBytesPerSecond, 1))),
-            lowerLabel: language.text("磁盘传输速率", "Disk transfer rate"),
+            lowerLabel: language.text("磁盘传输速率（读/写）", "Disk transfer rate (read/write)"),
             leftMetrics: [
                 .init(label: language.text("活动时间", "Active time"), value: DisplayFormat.percentWithPrecision(disk.activityPercent, digits: 0), prominent: true),
                 .init(label: language.text("平均响应时间", "Avg. response"), value: String(format: "%.1f %@", disk.responseTimeMs, language.text("毫秒", "ms")), prominent: true),
@@ -1089,7 +1782,7 @@ final class SystemMonitor: ObservableObject {
                 .init(label: language.text("容量", "Capacity"), value: DisplayFormat.decimalBytes(disk.capacityBytes)),
                 .init(label: language.text("可用", "Available"), value: DisplayFormat.decimalBytes(disk.availableBytes)),
                 .init(label: language.text("系统磁盘", "System disk"), value: disk.isSystemDisk ? language.text("是", "Yes") : language.text("否", "No")),
-                .init(label: language.text("类型", "Type"), value: language.isChinese ? disk.kindLabel : language.translateDiskKind(disk.kindLabel)),
+                .init(label: language.text("类型", "Type"), value: diskKind),
                 .init(label: language.text("卷标", "Label"), value: disk.subtitle)
             ],
             memoryComposition: false
@@ -1097,7 +1790,8 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func networkDetail(_ network: NetworkState) -> PerformanceDetailViewData {
-        PerformanceDetailViewData(
+        let connectionType = language.isChinese && network.subtitle == "Wi-Fi" ? "WLAN" : network.subtitle
+        return PerformanceDetailViewData(
             title: network.displayName,
             topRight: network.interfaceName,
             ceilingLabel: DisplayFormat.networkRate(UInt64(max(network.chartCeilingBytesPerSecond, 1))),
@@ -1115,12 +1809,19 @@ final class SystemMonitor: ObservableObject {
             ],
             rightPairs: [
                 .init(label: language.text("适配器名称", "Adapter name"), value: network.displayName),
-                .init(label: language.text("连接类型", "Connection type"), value: network.subtitle),
+                .init(label: language.text("连接类型", "Connection type"), value: connectionType),
                 .init(label: language.text("IPv4 地址", "IPv4 address"), value: network.ipv4.isEmpty ? "--" : network.ipv4),
                 .init(label: language.text("IPv6 地址", "IPv6 address"), value: network.ipv6.isEmpty ? "--" : network.ipv6)
             ],
             memoryComposition: false
         )
+    }
+
+    private func diskKindDisplayText(_ rawKind: String) -> String {
+        if rawKind == "SSD" || rawKind == "HDD" {
+            return rawKind
+        }
+        return language.isChinese ? rawKind : language.translateDiskKind(rawKind)
     }
 
     private func npuDetail(_ npu: NPUState) -> PerformanceDetailViewData {
@@ -1132,15 +1833,17 @@ final class SystemMonitor: ObservableObject {
             chartCeiling: 100,
             primaryLabel: "",
             accent: Color(red: 0.96, green: 0.26, blue: 0.26),
-            chartSets: [npu.historyCompute],
-            lowerChart: npu.historyMemoryPressure,
-            lowerChartValueCeiling: 100,
+            chartSets: [npu.historyActiveTime],
+            lowerChart: npu.historyFootprint,
+            lowerChartValueCeiling: Double(totalMemory),
             lowerChartCeiling: DisplayFormat.memory(totalMemory),
             lowerLabel: language.text("共享内存", "Shared memory"),
             leftMetrics: [
-                .init(label: language.text("利用率", "Utilization"), value: DisplayFormat.percent(npu.utilizationPercent), prominent: true),
+                .init(label: language.text("活跃度", "Activity"), value: DisplayFormat.percent(npu.activeTimePercent), prominent: true),
+                .init(label: language.text("功耗", "Power"), value: DisplayFormat.watts(npu.peakPowerWatts), prominent: true),
                 .init(label: language.text("共享内存", "Shared memory"), value: "\(DisplayFormat.memory(npu.neuralFootprintBytes))/\(DisplayFormat.memory(totalMemory))", prominent: true),
-                .init(label: language.text("峰值", "Peak"), value: DisplayFormat.memory(npu.peakNeuralFootprintBytes))
+                .init(label: language.text("读取搬运", "Read movement"), value: DisplayFormat.throughput(npu.dataReadBytesPerSecond)),
+                .init(label: language.text("写入搬运", "Write movement"), value: DisplayFormat.throughput(npu.dataWriteBytesPerSecond))
             ],
             rightPairs: [
                 .init(label: language.text("NPU 个数", "NPU count"), value: "\(npu.npuCount)"),
@@ -1149,6 +1852,53 @@ final class SystemMonitor: ObservableObject {
                 .init(label: language.text("固件已加载", "Firmware loaded"), value: language.text(npu.firmwareLoaded ? "是" : "否", npu.firmwareLoaded ? "Yes" : "No")),
                 .init(label: language.text("活跃客户端数", "Active clients"), value: "\(npu.activeClientCount)"),
                 .init(label: language.text("引擎类型", "Engine type"), value: "Apple Neural Engine")
+            ],
+            memoryComposition: false
+        )
+    }
+
+    private func thermalDetail() -> PerformanceDetailViewData {
+        let fanless = thermal.maximumFanRPM == 0 || thermal.currentFanRPM == 0 && thermal.peakFanRPM == 0
+        let chartValues = fanless ? thermal.historyNetworkTemperatureCelsius : thermal.historyFanRPM
+        let chartCeiling = fanless ? max(thermal.networkTemperatureChartCeilingCelsius, 1) : max(thermal.fanChartCeilingRPM, 1)
+        let ceilingLabel = fanless
+            ? thermalTemperatureText(thermal.networkTemperatureChartCeilingCelsius)
+            : "\(Int(max(thermal.fanChartCeilingRPM, 1))) RPM"
+        let topRight = fanless
+            ? thermalTemperatureText(thermal.networkTemperatureCelsius)
+            : "\(thermal.currentFanRPM) RPM"
+        let primaryLabel = fanless
+            ? language.text("网卡温度", "Network temperature")
+            : language.text("风扇转速", "Fan speed")
+        return PerformanceDetailViewData(
+            title: language.text("散热", "Thermal"),
+            topRight: topRight,
+            ceilingLabel: ceilingLabel,
+            chartCeiling: chartCeiling,
+            primaryLabel: primaryLabel,
+            accent: Color(red: 0.33, green: 0.73, blue: 0.25),
+            chartSets: [chartValues],
+            lowerChart: nil,
+            lowerChartValueCeiling: nil,
+            lowerChartCeiling: nil,
+            lowerLabel: nil,
+            leftMetrics: [
+                .init(label: language.text("CPU 温度", "CPU temperature"), value: thermalTemperatureText(thermal.cpuTemperatureCelsius), prominent: true),
+                .init(label: language.text("E 核温度", "E-core temperature"), value: thermalTemperatureText(thermal.efficiencyCoreTemperatureCelsius), prominent: true),
+                .init(label: language.text("P 核温度", "P-core temperature"), value: thermalTemperatureText(thermal.performanceCoreTemperatureCelsius), prominent: true),
+                .init(label: language.text("GPU 温度", "GPU temperature"), value: thermalTemperatureText(thermal.gpuTemperatureCelsius), prominent: true),
+                .init(label: language.text("磁盘温度", "Disk temperature"), value: thermalTemperatureText(thermal.diskTemperatureCelsius), prominent: true),
+                .init(label: language.text("网卡温度", "Network temperature"), value: thermalTemperatureText(thermal.networkTemperatureCelsius), prominent: true),
+                .init(label: language.text("整机温度", "System temperature"), value: thermalTemperatureText(thermal.systemTemperatureCelsius), prominent: true)
+            ],
+            rightPairs: [
+                .init(label: language.text("风扇转速", "Fan speed"), value: "\(thermal.currentFanRPM) RPM"),
+                .init(label: language.text("机器热度评估", "Thermal evaluation"), value: thermal.statusText),
+                .init(label: language.text("主板温度", "Logic board temperature"), value: thermalTemperatureText(thermal.logicBoardTemperatureCelsius)),
+                .init(label: language.text("SoC 温度", "SoC temperature"), value: thermalTemperatureText(thermal.socTemperatureCelsius)),
+                .init(label: language.text("交流/直流", "AC/DC"), value: thermalTemperatureText(thermal.powerSupplyTemperatureCelsius)),
+                .init(label: language.text("电源表面", "Power surface"), value: thermalTemperatureText(thermal.powerSurfaceTemperatureCelsius)),
+                .init(label: language.text("外壳温度", "Enclosure temperature"), value: thermalTemperatureText(thermal.enclosureTemperatureCelsius))
             ],
             memoryComposition: false
         )
@@ -1315,6 +2065,23 @@ extension SystemMonitor {
     struct NeuralUsageTotals {
         let currentBytes: UInt64
         let intervalPeakBytes: UInt64
+    }
+
+    struct ThermalSnapshot {
+        let currentFanRPM: UInt32
+        let maximumFanRPM: UInt32
+        let cpuTemperatureCelsius: Double?
+        let efficiencyCoreTemperatureCelsius: Double?
+        let performanceCoreTemperatureCelsius: Double?
+        let gpuTemperatureCelsius: Double?
+        let diskTemperatureCelsius: Double?
+        let networkTemperatureCelsius: Double?
+        let logicBoardTemperatureCelsius: Double?
+        let socTemperatureCelsius: Double?
+        let powerSupplyTemperatureCelsius: Double?
+        let powerSurfaceTemperatureCelsius: Double?
+        let enclosureTemperatureCelsius: Double?
+        let systemTemperatureCelsius: Double?
     }
 
     func processCPUSeconds(pid: Int32) -> Double {
@@ -1612,12 +2379,11 @@ extension SystemMonitor {
         guard cpuArchitecture != .intelLike else {
             return nil
         }
-        guard let data = try? Process.runAndCapture("/usr/sbin/ioreg", ["-l", "-w0"]),
-              let text = String(data: data, encoding: .utf8),
-              text.localizedCaseInsensitiveContains("ANE")
-        else {
+        guard let data = try? Process.runAndCapture("/usr/sbin/ioreg", ["-l", "-w0"]) else {
             return nil
         }
+        let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        guard text.localizedCaseInsensitiveContains("ANE") else { return nil }
 
         let npuCount = text.localizedCaseInsensitiveContains("ANEDevicePropertyNumANEs") ? 1 : 1
         let coreCount = 16
@@ -1659,6 +2425,203 @@ extension SystemMonitor {
             }
         }
         return NeuralUsageTotals(currentBytes: total, intervalPeakBytes: peak)
+    }
+
+    func collectThermalSnapshot() -> ThermalSnapshot {
+        let smc = thermalSMCReader ?? {
+            let reader = SMCReader()
+            thermalSMCReader = reader
+            if let reader {
+                let names = reader.readAllKeys()
+                thermalFanActualKeys = names.filter { $0.count == 4 && $0.hasPrefix("F") && $0.hasSuffix("Ac") }.sorted()
+                thermalFanMaxKeys = names.filter { $0.count == 4 && $0.hasPrefix("F") && $0.hasSuffix("Mx") }.sorted()
+                thermalCPUTempKeys = names.filter { $0.hasPrefix("Tp") || $0.hasPrefix("Te") || $0.hasPrefix("Ts") }.sorted()
+                thermalGPUTempKeys = names.filter { $0.hasPrefix("Tg") }.sorted()
+            }
+            return reader
+        }()
+        let smcTemps = readSMCTemperatures(using: smc)
+        let ioHIDTemps: (cpu: [Double], gpu: [Double]) = (smcTemps.cpu.isEmpty || smcTemps.gpu.isEmpty) ? readIOHIDTemperatures() : ([], [])
+        let cpuTemperature = averageTemperature(from: smcTemps.cpu.isEmpty ? ioHIDTemps.cpu : smcTemps.cpu)
+        let efficiencyCoreTemperature = averageTemperature(from: smcTemps.efficiencyCores)
+        let performanceCoreTemperature = averageTemperature(from: smcTemps.performanceCores)
+        let gpuTemperature = averageTemperature(from: smcTemps.gpu.isEmpty ? ioHIDTemps.gpu : smcTemps.gpu)
+        let diskTemperature: Double?
+        if Date().timeIntervalSince(lastThermalDiskProbeDate) >= 5 || cachedDiskTemperatureCelsius == nil {
+            cachedDiskTemperatureCelsius = readDiskTemperatureCelsius()
+            lastThermalDiskProbeDate = Date()
+            diskTemperature = cachedDiskTemperatureCelsius
+        } else {
+            diskTemperature = cachedDiskTemperatureCelsius
+        }
+        let networkTemperature = readMappedSMCTemperature(using: smc, key: "TW0P")
+        let logicBoardTemperature = readMappedSMCTemperature(using: smc, key: "TH0a") ?? readMappedSMCTemperature(using: smc, key: "TH0x")
+        let socTemperature = readMappedSMCTemperature(using: smc, key: "TSCD")
+        let powerSupplyTemperature = readMappedSMCTemperature(using: smc, key: "TPD0")
+        let powerSurfaceTemperature = readMappedSMCTemperature(using: smc, key: "TCMb")
+        let enclosureTemperature = readMappedSMCTemperature(using: smc, key: "Tm0p") ?? readMappedSMCTemperature(using: smc, key: "Tm2p")
+        let systemTemperature = averageTemperature(
+            from: [cpuTemperature, gpuTemperature, diskTemperature, networkTemperature, logicBoardTemperature, socTemperature, powerSupplyTemperature, enclosureTemperature].compactMap { $0 }
+        )
+
+        return ThermalSnapshot(
+            currentFanRPM: readCurrentFanRPM(using: smc),
+            maximumFanRPM: readMaximumFanRPM(using: smc),
+            cpuTemperatureCelsius: cpuTemperature,
+            efficiencyCoreTemperatureCelsius: efficiencyCoreTemperature,
+            performanceCoreTemperatureCelsius: performanceCoreTemperature,
+            gpuTemperatureCelsius: gpuTemperature,
+            diskTemperatureCelsius: diskTemperature,
+            networkTemperatureCelsius: networkTemperature,
+            logicBoardTemperatureCelsius: logicBoardTemperature,
+            socTemperatureCelsius: socTemperature,
+            powerSupplyTemperatureCelsius: powerSupplyTemperature,
+            powerSurfaceTemperatureCelsius: powerSurfaceTemperature,
+            enclosureTemperatureCelsius: enclosureTemperature,
+            systemTemperatureCelsius: systemTemperature
+        )
+    }
+
+    private func readCurrentFanRPM(using smc: SMCReader?) -> UInt32 {
+        guard let smc else { return 0 }
+        let values = thermalFanActualKeys.compactMap { key -> UInt32? in
+            guard let value = smc.readNumericValue(for: key) else { return nil }
+            return UInt32(max(value, 0))
+        }
+        return values.max() ?? 0
+    }
+
+    private func readMaximumFanRPM(using smc: SMCReader?) -> UInt32 {
+        guard let smc else { return 6000 }
+        let values = thermalFanMaxKeys.compactMap { key -> UInt32? in
+            guard let value = smc.readNumericValue(for: key) else { return nil }
+            return UInt32(max(value, 0))
+        }
+        return values.max() ?? 6000
+    }
+
+    private func readSMCTemperatures(using smc: SMCReader?) -> (cpu: [Double], efficiencyCores: [Double], performanceCores: [Double], gpu: [Double]) {
+        guard let smc else { return ([], [], [], []) }
+        var cpuValues: [Double] = []
+        var efficiencyCoreValues: [Double] = []
+        var performanceCoreValues: [Double] = []
+        var gpuValues: [Double] = []
+
+        for name in thermalCPUTempKeys {
+            guard let value = smc.readFloatValue(for: name), value > 0, value <= 150 else { continue }
+            cpuValues.append(value)
+            if name.hasPrefix("Te") {
+                efficiencyCoreValues.append(value)
+            } else if name.hasPrefix("Tp") {
+                performanceCoreValues.append(value)
+            }
+        }
+        for name in thermalGPUTempKeys {
+            guard let value = smc.readFloatValue(for: name), value > 0, value <= 150 else { continue }
+            gpuValues.append(value)
+        }
+
+        return (cpuValues, efficiencyCoreValues, performanceCoreValues, gpuValues)
+    }
+
+    private func readMappedSMCTemperature(using smc: SMCReader?, key: String) -> Double? {
+        guard let smc else { return nil }
+        guard let value = smc.readFloatValue(for: key), value > 0, value <= 150 else { return nil }
+        return value
+    }
+
+    func readIOHIDTemperatures() -> (cpu: [Double], gpu: [Double]) {
+        guard let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault) else {
+            return ([], [])
+        }
+
+        let matching = [
+            "PrimaryUsagePage": 0xff00,
+            "PrimaryUsage": 0x0005
+        ] as CFDictionary
+        _ = IOHIDEventSystemClientSetMatching(system, matching)
+        guard let services = IOHIDEventSystemClientCopyServices(system)?.takeRetainedValue() else {
+            return ([], [])
+        }
+
+        var cpuValues: [Double] = []
+        var gpuValues: [Double] = []
+        let count = CFArrayGetCount(services)
+        for index in 0..<count {
+            let rawService = CFArrayGetValueAtIndex(services, index)
+            guard let service = UnsafeRawPointer(rawService) else { continue }
+            guard let nameRef = IOHIDServiceClientCopyProperty(service, "Product" as CFString)?.takeRetainedValue() else { continue }
+            let name = nameRef as! String
+            guard let event = IOHIDServiceClientCopyEvent(service, 15, 0, 0) else { continue }
+            let temp = IOHIDEventGetFloatValue(event, 15 << 16)
+            CFReleaseShim(unsafeBitCast(event, to: CFTypeRef.self))
+            guard temp > 0, temp <= 150 else { continue }
+            if name.hasPrefix("pACC MTR Temp Sensor") || name.hasPrefix("eACC MTR Temp Sensor") {
+                cpuValues.append(temp)
+            } else if name.hasPrefix("GPU MTR Temp Sensor") {
+                gpuValues.append(temp)
+            }
+        }
+
+        return (cpuValues, gpuValues)
+    }
+
+    func readDiskTemperatureCelsius() -> Double? {
+        guard let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault),
+              let services = IOHIDEventSystemClientCopyServices(system)?.takeRetainedValue()
+        else {
+            return nil
+        }
+
+        var values: [Double] = []
+        let count = CFArrayGetCount(services)
+        for index in 0..<count {
+            let rawService = CFArrayGetValueAtIndex(services, index)
+            guard let service = UnsafeRawPointer(rawService) else { continue }
+
+            guard let nameRef = IOHIDServiceClientCopyProperty(service, "Product" as CFString)?.takeRetainedValue() else { continue }
+            let name = nameRef as! String
+            let lowercased = name.lowercased()
+            guard lowercased.contains("temp") else { continue }
+            guard lowercased.contains("nand") || lowercased.contains("ssd") || lowercased.contains("nvme") else { continue }
+            guard let event = IOHIDServiceClientCopyEvent(service, 15, 0, 0) else { continue }
+            let temp = IOHIDEventGetFloatValue(event, 15 << 16)
+            CFReleaseShim(unsafeBitCast(event, to: CFTypeRef.self))
+            guard temp > 0, temp <= 150 else { continue }
+            values.append(temp)
+        }
+
+        return averageTemperature(from: values)
+    }
+
+    func averageTemperature(from values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    func thermalTemperatureText(_ value: Double?) -> String {
+        temperatureUnit.format(value)
+    }
+
+    func thermalSubtitle(from snapshot: ThermalSnapshot) -> String {
+        language.text("温度", "Temperature") + ": " + thermalTemperatureText(snapshot.systemTemperatureCelsius)
+    }
+
+    func thermalStatusText(currentFanRPM: UInt32, systemTemperatureCelsius: Double?, cpuTemperatureCelsius: Double?, gpuTemperatureCelsius: Double?) -> String {
+        let reference = max(systemTemperatureCelsius ?? 0, cpuTemperatureCelsius ?? 0, gpuTemperatureCelsius ?? 0)
+        if reference >= 90 || currentFanRPM >= 5000 {
+            return language.text("非常热", "Very hot")
+        }
+        if reference >= 80 || currentFanRPM >= 4000 {
+            return language.text("热", "Hot")
+        }
+        if reference >= 60 || currentFanRPM >= 2500 {
+            return language.text("正常", "Normal")
+        }
+        if reference >= 40 || currentFanRPM >= 1200 {
+            return language.text("凉", "Cool")
+        }
+        return language.text("凉爽", "Very cool")
     }
 
     func extractFirstMatch(in text: String, pattern: String) -> String? {
@@ -2584,12 +3547,11 @@ private enum MonitorProbe {
         guard cpuArchitecture != .intelLike else {
             return nil
         }
-        guard let data = try? Process.runAndCapture("/usr/sbin/ioreg", ["-l", "-w0"]),
-              let text = String(data: data, encoding: .utf8),
-              text.localizedCaseInsensitiveContains("ANE")
-        else {
+        guard let data = try? Process.runAndCapture("/usr/sbin/ioreg", ["-l", "-w0"]) else {
             return nil
         }
+        let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        guard text.localizedCaseInsensitiveContains("ANE") else { return nil }
 
         let npuCount = text.localizedCaseInsensitiveContains("ANEDevicePropertyNumANEs") ? 1 : 1
         let coreCount = 16
@@ -2617,31 +3579,25 @@ private enum MonitorProbe {
     static func collectNPUState(
         previous: NPUState?,
         aneInfo: SystemMonitor.ANEDeviceInfo?,
-        cpuUtilization: Double,
-        gpuUtilization: Double,
-        totalMemory: UInt64
+        totalMemory: UInt64,
+        activeTimePercent: Double,
+        powerWatts: Double,
+        dataReadBytesPerSecond: UInt64,
+        dataWriteBytesPerSecond: UInt64,
+        dataMovementBytesPerSecond: UInt64
     ) -> NPUState? {
         guard let aneInfo else { return nil }
 
         let usage = currentNeuralUsageTotals()
         let peakFootprint = max(previous?.peakNeuralFootprintBytes ?? 0, usage.intervalPeakBytes, usage.currentBytes, 1)
-        let previousFootprint = previous?.neuralFootprintBytes ?? usage.currentBytes
-        let deltaFootprint = usage.currentBytes >= previousFootprint ? usage.currentBytes - previousFootprint : previousFootprint - usage.currentBytes
-        let footprintDeltaPercent = min(Double(deltaFootprint) / Double(max(peakFootprint, 1)) * 100, 100)
-        let activity = min(
-            max(
-                3.0
-                + cpuUtilization * 0.04
-                + gpuUtilization * 0.05
-                + footprintDeltaPercent * 0.08,
-                0
-            ),
-            18
-        )
-        let historyCompute = shifted(previous?.historyCompute ?? Array(repeating: 0, count: 60), adding: activity)
+        let peakPowerWatts = max(previous?.peakPowerWatts ?? 0, powerWatts)
+        let peakDataMovement = max(previous?.peakDataMovementBytesPerSecond ?? 0, dataMovementBytesPerSecond, 1)
+        let historyActiveTime = shifted(previous?.historyActiveTime ?? Array(repeating: 0, count: 60), adding: activeTimePercent)
+        let historyPowerWatts = shifted(previous?.historyPowerWatts ?? Array(repeating: 0, count: 60), adding: powerWatts)
+        let historyDataMovementBytes = shifted(previous?.historyDataMovementBytes ?? Array(repeating: 0, count: 60), adding: Double(dataMovementBytesPerSecond))
         let historyFootprint = shifted(
             previous?.historyFootprint ?? Array(repeating: 0, count: 60),
-            adding: min(Double(usage.currentBytes) / Double(max(peakFootprint, 1)) * 100, 100)
+            adding: Double(usage.currentBytes)
         )
         let historyMemoryPressure = shifted(
             previous?.historyMemoryPressure ?? Array(repeating: 0, count: 60),
@@ -2660,10 +3616,18 @@ private enum MonitorProbe {
             currentPowerState: aneInfo.currentPowerState,
             maxPowerState: aneInfo.maxPowerState,
             activeClientCount: aneInfo.activeClientCount,
-            utilizationPercent: activity,
+            activeTimePercent: activeTimePercent,
+            powerWatts: powerWatts,
+            peakPowerWatts: peakPowerWatts,
+            dataReadBytesPerSecond: dataReadBytesPerSecond,
+            dataWriteBytesPerSecond: dataWriteBytesPerSecond,
+            dataMovementBytesPerSecond: dataMovementBytesPerSecond,
+            peakDataMovementBytesPerSecond: peakDataMovement,
             neuralFootprintBytes: usage.currentBytes,
             peakNeuralFootprintBytes: peakFootprint,
-            historyCompute: historyCompute,
+            historyActiveTime: historyActiveTime,
+            historyPowerWatts: historyPowerWatts,
+            historyDataMovementBytes: historyDataMovementBytes,
             historyFootprint: historyFootprint,
             historyMemoryPressure: historyMemoryPressure
         )

@@ -20,6 +20,7 @@ struct RootWindowView: View {
     @StateObject private var networkDetailsPanelManager = NetworkDetailsPanelManager()
     @StateObject private var aboutPanelManager = AboutPanelManager()
     @State private var language: AppLanguage = .chinese
+    @State private var temperatureUnit: TemperatureUnit = .celsius
     @State private var selectedTab: TaskTab = .processes
     @State private var selectedPerf: PerfSelection = .cpu
     @State private var performanceViewMode: PerformanceViewMode = .full
@@ -31,10 +32,13 @@ struct RootWindowView: View {
     @State private var activeMenu: MenuKind?
     @State private var showRefreshSpeedSubmenu = false
     @State private var showLanguageSubmenu = false
+    @State private var showTemperatureUnitSubmenu = false
     @State private var refreshSpeedParentHovered = false
     @State private var refreshSpeedSubmenuHovered = false
     @State private var languageParentHovered = false
     @State private var languageSubmenuHovered = false
+    @State private var temperatureUnitParentHovered = false
+    @State private var temperatureUnitSubmenuHovered = false
     @State private var alwaysOnTop = false
     @State private var hideWhenMinimized = false
     @State private var useSmallValues = false
@@ -45,6 +49,7 @@ struct RootWindowView: View {
     @State private var selectedProcessPID: Int32?
     @State private var taskActionErrorMessage = ""
     @State private var lastWindowPresentationMode: WindowPresentationMode?
+    @State private var commandKeyPressed = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -196,7 +201,9 @@ struct RootWindowView: View {
             onAltF: { openMenu(.file) },
             onAltO: { openMenu(.options) },
             onAltV: { openMenu(.view) },
-            onEscape: { activeMenu = nil }
+            onEscape: { activeMenu = nil },
+            onControlChanged: { monitor.setTemporarilyPaused($0) },
+            onCommandChanged: { commandKeyPressed = $0 }
         ))
         .onChange(of: alwaysOnTop) { _, value in
             updateWindowLevel(alwaysOnTop: value)
@@ -224,6 +231,12 @@ struct RootWindowView: View {
         .onChange(of: languageSubmenuHovered) { _, _ in
             reconcileLanguageSubmenuVisibility()
         }
+        .onChange(of: temperatureUnitParentHovered) { _, _ in
+            reconcileTemperatureUnitSubmenuVisibility()
+        }
+        .onChange(of: temperatureUnitSubmenuHovered) { _, _ in
+            reconcileTemperatureUnitSubmenuVisibility()
+        }
         .onAppear {
             let mode = currentWindowPresentationMode
             lastWindowPresentationMode = mode
@@ -249,12 +262,17 @@ struct RootWindowView: View {
             networkDetailsPanelManager.updateLanguage(newValue)
             aboutPanelManager.update(language: newValue)
         }
+        .onChange(of: temperatureUnit) { _, newValue in
+            monitor.temperatureUnit = newValue
+        }
         .onAppear {
             monitor.language = language
+            monitor.temperatureUnit = temperatureUnit
             monitor.start()
             updateWindowTrafficLights()
         }
         .environment(\.appLanguage, language)
+        .environment(\.temperatureUnit, temperatureUnit)
     }
 
     private var compactApplicationRows: [ProcessRowData] {
@@ -293,10 +311,13 @@ struct RootWindowView: View {
         activeMenu = menu
         showRefreshSpeedSubmenu = false
         showLanguageSubmenu = false
+        showTemperatureUnitSubmenu = false
         refreshSpeedParentHovered = false
         refreshSpeedSubmenuHovered = false
         languageParentHovered = false
         languageSubmenuHovered = false
+        temperatureUnitParentHovered = false
+        temperatureUnitSubmenuHovered = false
     }
 
     private func reconcileRefreshSubmenuVisibility() {
@@ -305,6 +326,10 @@ struct RootWindowView: View {
 
     private func reconcileLanguageSubmenuVisibility() {
         showLanguageSubmenu = languageParentHovered || languageSubmenuHovered
+    }
+
+    private func reconcileTemperatureUnitSubmenuVisibility() {
+        showTemperatureUnitSubmenu = temperatureUnitParentHovered || temperatureUnitSubmenuHovered
     }
 
     private func menuXOffset(for menu: MenuKind) -> CGFloat {
@@ -321,7 +346,11 @@ struct RootWindowView: View {
         case .file:
             menuPanel {
                 menuItem(language.text("运行新任务(N)", "Run new task(N)"), altHint: nil) {
-                    newTaskPanelManager.show(language: language)
+                    if commandKeyPressed {
+                        openNewTerminalWindow()
+                    } else {
+                        newTaskPanelManager.show(language: language)
+                    }
                     activeMenu = nil
                 }
                 Divider()
@@ -354,6 +383,12 @@ struct RootWindowView: View {
                 } action: {}
                 .onHover { hovering in
                     languageParentHovered = hovering
+                }
+                subMenuItem(language.text("温度单位", "Temperature unit"), expanded: showTemperatureUnitSubmenu) {
+                    temperatureUnitMenu
+                } action: {}
+                .onHover { hovering in
+                    temperatureUnitParentHovered = hovering
                 }
             }
         case .view:
@@ -455,6 +490,52 @@ struct RootWindowView: View {
         .offset(x: 167, y: -1)
         .onHover { hovering in
             languageSubmenuHovered = hovering
+        }
+    }
+
+    private var temperatureUnitMenu: some View {
+        VStack(spacing: 0) {
+            Button {
+                temperatureUnit = .celsius
+                showTemperatureUnitSubmenu = false
+                activeMenu = nil
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: temperatureUnit == .celsius ? "checkmark" : "")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 12)
+                    Text(language.text("摄氏度°C", "Celsius °C"))
+                        .font(.system(size: 13))
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+            }
+            .buttonStyle(WinMenuButtonStyle())
+
+            Button {
+                temperatureUnit = .fahrenheit
+                showTemperatureUnitSubmenu = false
+                activeMenu = nil
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: temperatureUnit == .fahrenheit ? "checkmark" : "")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 12)
+                    Text(language.text("华氏度°F", "Fahrenheit °F"))
+                        .font(.system(size: 13))
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+            }
+            .buttonStyle(WinMenuButtonStyle())
+        }
+        .frame(width: 170)
+        .winMenuPanel()
+        .offset(x: 167, y: -1)
+        .onHover { hovering in
+            temperatureUnitSubmenuHovered = hovering
         }
     }
 
@@ -796,6 +877,19 @@ struct RootWindowView: View {
         pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
     }
 
+    private func openNewTerminalWindow() {
+        let script = """
+        tell application "Terminal"
+            activate
+            do script ""
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+    }
+
     private func setProcessPriority(pid: Int32, preset: ProcessPriorityPreset) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/renice")
@@ -974,28 +1068,20 @@ struct WindowChromeView: View {
 }
 
 struct TaskManagerGlyph: View {
-    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.95))
-                .frame(width: 16, height: 16)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .stroke(colorScheme == .dark ? Color.white.opacity(0.18) : Color.gray.opacity(0.5), lineWidth: 1)
-                )
-
-            Path { path in
-                path.move(to: CGPoint(x: 3, y: 12))
-                path.addLine(to: CGPoint(x: 6, y: 12))
-                path.addLine(to: CGPoint(x: 7.3, y: 8))
-                path.addLine(to: CGPoint(x: 9.4, y: 10.4))
-                path.addLine(to: CGPoint(x: 11.2, y: 4))
-                path.addLine(to: CGPoint(x: 13, y: 11))
-            }
-            .stroke(AppTheme.accentBlue, lineWidth: 1.1)
-            .frame(width: 16, height: 16)
+        Path { path in
+            path.move(to: CGPoint(x: 1.6, y: 12.4))
+            path.addLine(to: CGPoint(x: 5.2, y: 12.4))
+            path.addLine(to: CGPoint(x: 7.1, y: 6.4))
+            path.addLine(to: CGPoint(x: 9.6, y: 9.6))
+            path.addLine(to: CGPoint(x: 12.0, y: 2.2))
+            path.addLine(to: CGPoint(x: 14.3, y: 11.8))
         }
+        .stroke(
+            AppTheme.accentBlue,
+            style: StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round)
+        )
+        .frame(width: 16, height: 16)
     }
 }
 
@@ -1788,6 +1874,8 @@ struct MenuKeyHandlingView: NSViewRepresentable {
     let onAltO: () -> Void
     let onAltV: () -> Void
     let onEscape: () -> Void
+    let onControlChanged: (Bool) -> Void
+    let onCommandChanged: (Bool) -> Void
 
     func makeNSView(context: Context) -> KeyHandlingNSView {
         let view = KeyHandlingNSView()
@@ -1795,6 +1883,8 @@ struct MenuKeyHandlingView: NSViewRepresentable {
         view.onAltO = onAltO
         view.onAltV = onAltV
         view.onEscape = onEscape
+        view.onControlChanged = onControlChanged
+        view.onCommandChanged = onCommandChanged
         return view
     }
 
@@ -1803,6 +1893,8 @@ struct MenuKeyHandlingView: NSViewRepresentable {
         nsView.onAltO = onAltO
         nsView.onAltV = onAltV
         nsView.onEscape = onEscape
+        nsView.onControlChanged = onControlChanged
+        nsView.onCommandChanged = onCommandChanged
         DispatchQueue.main.async {
             nsView.window?.makeFirstResponder(nsView)
         }
@@ -1814,6 +1906,8 @@ final class KeyHandlingNSView: NSView {
     var onAltO: (() -> Void)?
     var onAltV: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onControlChanged: ((Bool) -> Void)?
+    var onCommandChanged: ((Bool) -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1835,5 +1929,11 @@ final class KeyHandlingNSView: NSView {
         case "v": onAltV?()
         default: super.keyDown(with: event)
         }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        onControlChanged?(event.modifierFlags.contains(.control))
+        onCommandChanged?(event.modifierFlags.contains(.command))
+        super.flagsChanged(with: event)
     }
 }

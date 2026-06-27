@@ -13,7 +13,13 @@ private struct PerformanceChartHeights {
 }
 
 struct PerformancePageView: View {
+    private enum NPUGraphMenuTarget {
+        case left
+        case right
+    }
+
     @Environment(\.appLanguage) private var language
+    @Environment(\.temperatureUnit) private var temperatureUnit
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var monitor: SystemMonitor
     @Binding var selectedPerf: PerfSelection
@@ -26,7 +32,10 @@ struct PerformancePageView: View {
     @State private var leftGPUSelection: GPUGraphKind = .threeD
     @State private var rightGPUSelection: GPUGraphKind = .tilerCopy
     @State private var openGPUMenu: GPUGraphMenuTarget?
-    @State private var openNPUMenu = false
+    @State private var openNPUMenu: NPUGraphMenuTarget?
+    @State private var leftNPUGraphKind: NPUGraphKind = .power
+    @State private var rightNPUGraphKind: NPUGraphKind = .active
+    @State private var npuGraphLayoutMode: NPUGraphLayoutMode = .multiEngine
     @State private var sidebarWidth: CGFloat = 214
     @State private var dragStartSidebarWidth: CGFloat?
 
@@ -214,15 +223,17 @@ struct PerformancePageView: View {
                         }
                     }
 
-                    HStack(spacing: 8) {
-                        Text(detail.primaryLabel)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        if shouldShowMainChartCeiling {
-                            Text(detail.ceilingLabel)
-                                .font(.system(size: 12))
+                    if !detail.primaryLabel.isEmpty {
+                        HStack(spacing: 8) {
+                            Text(detail.primaryLabel)
+                                .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            if shouldShowMainChartCeiling {
+                                Text(mainChartCeilingLabel(detail: detail))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
@@ -232,6 +243,8 @@ struct PerformancePageView: View {
                         gpuGraphContainer(detail, chartHeights: chartHeights)
                     } else if case .npu = selectedPerf {
                         npuGraphContainer(detail, chartHeights: chartHeights)
+                    } else if case .network = selectedPerf {
+                        networkGraphContainer(detail, chartHeights: chartHeights)
                     } else {
                         standardDetailChartContainer(detail, chartHeights: chartHeights)
                     }
@@ -290,16 +303,34 @@ struct PerformancePageView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        GridChart(
-                            values: lower,
-                            color: detail.accent,
-                            verticalSteps: 8,
-                            horizontalSteps: 4,
-                            lineWidth: 1.1,
-                            ceiling: detail.lowerChartValueCeiling ?? 100
-                        )
-                            .frame(height: 52)
-                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                        if case .disk(let id) = selectedPerf,
+                           let disk = monitor.disks.first(where: { $0.id == id }) {
+                            DualLineGridChart(
+                                primaryValues: disk.readHistory,
+                                secondaryValues: disk.writeHistory,
+                                color: detail.accent,
+                                verticalSteps: 8,
+                                horizontalSteps: 4,
+                                lineWidth: 1.1,
+                                ceiling: detail.lowerChartValueCeiling ?? 100,
+                                primaryFilled: true
+                            )
+                                .frame(height: 52)
+                                .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                        } else {
+                            GridChart(
+                                values: lower,
+                                color: detail.accent,
+                                verticalSteps: 8,
+                                horizontalSteps: 4,
+                                lineWidth: 1.1,
+                                filled: isNPU,
+                                ceiling: detail.lowerChartValueCeiling ?? 100,
+                                minimumVisibleRatio: isNPU ? 0.12 : 0
+                            )
+                                .frame(height: 52)
+                                .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                        }
 
                         HStack {
                             Text(language.text("60 秒", "60 sec"))
@@ -313,7 +344,14 @@ struct PerformancePageView: View {
                     }
 
                     if case .memory = selectedPerf {
-                        memoryStatsPanel(detail)
+                        memoryStatsPanel(
+                            detail,
+                            leftTitle: language.text("当前内存", "Current memory"),
+                            rightTitle: language.text("系统状态", "System state")
+                        )
+                            .padding(.top, 8)
+                    } else if case .thermal = selectedPerf {
+                        thermalStatsPanel()
                             .padding(.top, 8)
                     } else if isGPU || isNetwork || isNPU {
                         sideBySideStatsPanel(detail)
@@ -359,18 +397,41 @@ struct PerformancePageView: View {
         if case .cpu = selectedPerf { return true }
         if case .memory = selectedPerf { return true }
         if case .network = selectedPerf { return true }
+        if case .thermal = selectedPerf { return true }
         return false
     }
 
     private var shouldShowMainChartZeroLabel: Bool {
         if case .memory = selectedPerf { return true }
         if case .network = selectedPerf { return true }
+        if case .thermal = selectedPerf { return true }
         return false
     }
 
     private var shouldShowLowerChartZeroLabel: Bool {
         if case .disk = selectedPerf { return true }
         return false
+    }
+
+    private func mainChartCeilingLabel(detail: PerformanceDetailViewData) -> String {
+        guard isNPU,
+              case .npu(let id) = selectedPerf,
+              let npu = monitor.npus.first(where: { $0.id == id }),
+              npuGraphLayoutMode == .singleEngine
+        else {
+            return detail.ceilingLabel
+        }
+
+        switch leftNPUGraphKind {
+        case .active:
+            return "100%"
+        case .power:
+            return DisplayFormat.watts(npuChartCeiling(for: npu, kind: .power))
+        case .dataMovement:
+            return DisplayFormat.throughput(UInt64(max(npuChartCeiling(for: npu, kind: .dataMovement), 1)))
+        case .memory:
+            return DisplayFormat.memory(UInt64(max(npuChartCeiling(for: npu, kind: .memory), 1)))
+        }
     }
 
     private var detailSummaryPanel: some View {
@@ -461,7 +522,7 @@ struct PerformancePageView: View {
             cpuContextMenu()
         case .gpu:
             gpuContextMenu()
-        case .memory, .disk, .network, .npu:
+        case .memory, .disk, .network, .npu, .thermal:
             detailContextMenu()
         }
     }
@@ -557,14 +618,14 @@ struct PerformancePageView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func memoryStatsPanel(_ detail: PerformanceDetailViewData) -> some View {
+    private func memoryStatsPanel(_ detail: PerformanceDetailViewData, leftTitle: String, rightTitle: String) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             memoryStatsSection(
-                title: language.text("当前内存", "Current memory"),
+                title: leftTitle,
                 rows: detail.leftMetrics.map { ($0.label, $0.value) }
             )
             memoryStatsSection(
-                title: language.text("系统状态", "System state"),
+                title: rightTitle,
                 rows: detail.rightPairs.map { ($0.label, $0.value) }
             )
         }
@@ -590,6 +651,60 @@ struct PerformancePageView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+        }
+    }
+
+    private func thermalStatsPanel() -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            memoryStatsSection(
+                title: language.text("当前散热状态", "Current thermal status"),
+                rows: [
+                    (language.text("风扇转速", "Fan speed"), "\(monitor.thermal.currentFanRPM) RPM"),
+                    (language.text("外壳温度", "Enclosure temperature"), thermalValue(monitor.thermal.enclosureTemperatureCelsius)),
+                    (language.text("机器热度评估", "Thermal evaluation"), monitor.thermal.statusText)
+                ]
+            )
+            memoryStatsSection(
+                title: language.text("实时温度", "Real-time temperature"),
+                rows: [
+                    (language.text("CPU 温度", "CPU temperature"), thermalValue(monitor.thermal.cpuTemperatureCelsius)),
+                    (language.text("P核/E核温度", "P/E-core temperature"), combinedThermalValue(
+                        primary: monitor.thermal.performanceCoreTemperatureCelsius,
+                        secondary: monitor.thermal.efficiencyCoreTemperatureCelsius
+                    )),
+                    (language.text("GPU 温度", "GPU temperature"), thermalValue(monitor.thermal.gpuTemperatureCelsius)),
+                    (language.text("SoC 温度", "SoC temperature"), thermalValue(monitor.thermal.socTemperatureCelsius)),
+                    (language.text("磁盘温度", "Disk temperature"), thermalValue(monitor.thermal.diskTemperatureCelsius)),
+                    (language.text("网卡温度", "Network temperature"), thermalValue(monitor.thermal.networkTemperatureCelsius))
+                ]
+            )
+            memoryStatsSection(
+                title: language.text("附加温度", "Additional temperatures"),
+                rows: [
+                    (language.text("主板温度", "Logic board temperature"), thermalValue(monitor.thermal.logicBoardTemperatureCelsius)),
+                    (language.text("整机温度", "System temperature"), thermalValue(monitor.thermal.systemTemperatureCelsius)),
+                    (language.text("交流/直流", "AC/DC"), thermalValue(monitor.thermal.powerSupplyTemperatureCelsius)),
+                    (language.text("电源表面", "Power surface"), thermalValue(monitor.thermal.powerSurfaceTemperatureCelsius))
+                ]
+            )
+        }
+        .frame(maxWidth: 720, alignment: .leading)
+    }
+
+    private func thermalValue(_ value: Double?) -> String {
+        temperatureUnit.format(value)
+    }
+
+    private func combinedThermalValue(primary: Double?, secondary: Double?) -> String {
+        switch (primary, secondary) {
+        case let (p?, s?):
+            return "\(temperatureUnit.format(p))/\(temperatureUnit.format(s))"
+        case let (p?, nil):
+            return "\(temperatureUnit.format(p))/--"
+        case let (nil, s?):
+            return "--/\(temperatureUnit.format(s))"
+        case (nil, nil):
+            return "--"
         }
     }
 
@@ -786,7 +901,8 @@ struct PerformancePageView: View {
                             horizontalSteps: 6,
                             lineWidth: 1.0,
                             filled: true,
-                            fillOpacityMultiplier: 1.8
+                            fillOpacityMultiplier: 1.8,
+                            dash: [4, 2]
                         )
                         .padding(1)
                     }
@@ -835,7 +951,8 @@ struct PerformancePageView: View {
                     horizontalSteps: 6,
                     lineWidth: 1.0,
                     filled: true,
-                    fillOpacityMultiplier: 1.8
+                    fillOpacityMultiplier: 1.8,
+                    dash: [4, 2]
                 )
                     .padding(1)
             }
@@ -855,31 +972,104 @@ struct PerformancePageView: View {
             .frame(height: 340)
     }
 
-    private func npuGraphContainer(_ detail: PerformanceDetailViewData, chartHeights: PerformanceChartHeights) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            npuHeader(valueText: DisplayFormat.percentWithPrecision((detail.chartSets.first ?? []).last ?? 0, digits: 0))
-
-            GridChart(values: detail.chartSets.first ?? [], color: detail.accent, filled: true, ceiling: detail.chartCeiling)
-                .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                .frame(height: chartHeights.npuMain)
+    private func networkGraphContainer(_ detail: PerformanceDetailViewData, chartHeights: PerformanceChartHeights) -> some View {
+        guard case .network(let id) = selectedPerf,
+              let network = monitor.networks.first(where: { $0.id == id })
+        else {
+            return AnyView(EmptyView())
         }
-        .overlay(alignment: .topLeading) {
-            if openNPUMenu {
-                npuMenu()
-                    .offset(x: 0, y: 22)
+
+        return AnyView(
+            DualLineGridChart(
+                primaryValues: network.receiveHistory,
+                secondaryValues: network.sendHistory,
+                color: detail.accent,
+                verticalSteps: 8,
+                horizontalSteps: 6,
+                lineWidth: 1.25,
+                ceiling: detail.chartCeiling,
+                primaryFilled: true
+            )
+            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+            .frame(height: chartHeights.networkMain)
+            .contentShape(Rectangle())
+            .id("network-detail-\(selectedPerf.id)")
+        )
+    }
+
+    private func npuGraphContainer(_ detail: PerformanceDetailViewData, chartHeights: PerformanceChartHeights) -> some View {
+        guard case .npu(let npuID) = selectedPerf,
+              let npu = monitor.npus.first(where: { $0.id == npuID })
+        else {
+            return AnyView(EmptyView())
+        }
+
+        let leftKind = leftNPUGraphKind
+        let rightKind = rightNPUGraphKind
+        let values = npuValues(for: npu, kind: leftKind)
+        let ceiling = npuChartCeiling(for: npu, kind: leftKind)
+        let valueText = npuValueText(for: npu, kind: leftKind)
+
+        return AnyView(
+        Group {
+            if npuGraphLayoutMode == .singleEngine {
+                VStack(alignment: .leading, spacing: 4) {
+                    npuHeader(valueText: valueText, graphKind: leftKind, target: .left)
+
+                    GridChart(values: values, color: detail.accent, filled: true, ceiling: ceiling)
+                        .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                        .frame(height: chartHeights.npuMain)
+                }
+                .overlay(alignment: .topLeading) {
+                    if openNPUMenu == .left {
+                        npuMenu(target: .left)
+                            .offset(x: 0, y: 22)
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        npuHeader(valueText: npuValueText(for: npu, kind: leftKind), graphKind: leftKind, target: .left)
+
+                        GridChart(values: npuValues(for: npu, kind: leftKind), color: detail.accent, filled: true, ceiling: npuChartCeiling(for: npu, kind: leftKind))
+                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                            .frame(height: chartHeights.gpuDual)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if openNPUMenu == .left {
+                            npuMenu(target: .left)
+                                .offset(x: 0, y: 22)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        npuHeader(valueText: npuValueText(for: npu, kind: rightKind), graphKind: rightKind, target: .right)
+
+                        GridChart(values: npuValues(for: npu, kind: rightKind), color: detail.accent, filled: true, ceiling: npuChartCeiling(for: npu, kind: rightKind))
+                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                            .frame(height: chartHeights.gpuDual)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if openNPUMenu == .right {
+                            npuMenu(target: .right)
+                                .offset(x: 0, y: 22)
+                        }
+                    }
+                }
             }
         }
         .contentShape(Rectangle())
-        .id("npu-detail-\(selectedPerf.id)")
+        .id("npu-detail-\(selectedPerf.id)-\(npuGraphLayoutMode == .singleEngine ? "single" : "multi")-\(leftNPUGraphKind.rawValue)-\(rightNPUGraphKind.rawValue)")
+        )
     }
 
-    private func npuHeader(valueText: String) -> some View {
-        Button {
-            openNPUMenu.toggle()
+    private func npuHeader(valueText: String, graphKind: NPUGraphKind, target: NPUGraphMenuTarget) -> some View {
+        return Button {
+            openNPUMenu = openNPUMenu == target ? nil : target
         } label: {
             HStack(spacing: 4) {
                 HStack(spacing: 4) {
-                    Text(language.text("Compute", "Compute"))
+                    Text(graphKind.title(in: language))
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.down")
@@ -895,26 +1085,78 @@ struct PerformancePageView: View {
         .buttonStyle(.plain)
     }
 
-    private func npuMenu() -> some View {
+    private func npuMenu(target: NPUGraphMenuTarget) -> some View {
         VStack(spacing: 0) {
-            Button {
-                openNPUMenu = false
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .frame(width: 12)
-                    Text(language.text("Compute", "Compute"))
-                        .font(.system(size: 13))
-                    Spacer()
+            ForEach(NPUGraphKind.allCases) { kind in
+                Button {
+                    if target == .left {
+                        leftNPUGraphKind = kind
+                    } else {
+                        rightNPUGraphKind = kind
+                    }
+                    openNPUMenu = nil
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: currentNPUGraphKind(for: target) == kind ? "checkmark" : "")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 12)
+                        Text(kind.title(in: language))
+                            .font(.system(size: 13))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 28)
+                .buttonStyle(WinMenuButtonStyle())
             }
-            .buttonStyle(WinMenuButtonStyle())
         }
         .frame(width: 150)
         .winMenuPanel()
+    }
+
+    private func currentNPUGraphKind(for target: NPUGraphMenuTarget) -> NPUGraphKind {
+        target == .left ? leftNPUGraphKind : rightNPUGraphKind
+    }
+
+    private func npuValues(for npu: NPUState, kind: NPUGraphKind) -> [Double] {
+        switch kind {
+        case .active:
+            return npu.historyActiveTime
+        case .power:
+            return npu.historyPowerWatts
+        case .dataMovement:
+            return npu.historyDataMovementBytes
+        case .memory:
+            return npu.historyFootprint
+        }
+    }
+
+    private func npuChartCeiling(for npu: NPUState, kind: NPUGraphKind) -> Double {
+        switch kind {
+        case .active:
+            return 100
+        case .power:
+            let peak = max(npu.peakPowerWatts, npu.historyPowerWatts.max() ?? 0, 0.5)
+            return peak * 1.15
+        case .dataMovement:
+            let peak = max(Double(npu.peakDataMovementBytesPerSecond), npu.historyDataMovementBytes.max() ?? 0, 64 * 1024)
+            return peak * 1.15
+        case .memory:
+            return max(Double(max(npu.peakNeuralFootprintBytes, 1)), npu.historyFootprint.max() ?? 0)
+        }
+    }
+
+    private func npuValueText(for npu: NPUState, kind: NPUGraphKind) -> String {
+        switch kind {
+        case .active:
+            return DisplayFormat.percentWithPrecision(npu.activeTimePercent, digits: 0)
+        case .power:
+            return DisplayFormat.watts(npu.powerWatts)
+        case .dataMovement:
+            return DisplayFormat.throughput(npu.dataMovementBytesPerSecond)
+        case .memory:
+            return DisplayFormat.memory(npu.neuralFootprintBytes)
+        }
     }
 
     private func standardDetailChartContainer(_ detail: PerformanceDetailViewData, chartHeights: PerformanceChartHeights) -> some View {
@@ -935,18 +1177,18 @@ struct PerformancePageView: View {
 
     private func detailContextMenu() -> some View {
         Group {
-            Button(viewMode == .detailSummary ? language.text("图形完整视图", "Graph full view") : language.text("图形摘要视图", "Graph summary view")) {
-                viewMode = viewMode == .detailSummary ? .full : .detailSummary
-            }
             if case .npu = selectedPerf {
                 Menu(language.text("将图形更改为", "Change graph to")) {
                     Button(language.text("单个引擎", "Single engine")) {
-                        gpuGraphLayoutMode = .singleEngine
+                        npuGraphLayoutMode = .singleEngine
                     }
                     Button(language.text("多个引擎", "Multiple engines")) {
-                        gpuGraphLayoutMode = .multiEngine
+                        npuGraphLayoutMode = .multiEngine
                     }
                 }
+            }
+            Button(viewMode == .detailSummary ? language.text("图形完整视图", "Graph full view") : language.text("图形摘要视图", "Graph summary view")) {
+                viewMode = viewMode == .detailSummary ? .full : .detailSummary
             }
             Menu(language.text("查看", "View")) {
                 ForEach(monitor.sidebarItems) { item in

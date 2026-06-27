@@ -121,14 +121,49 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+enum TemperatureUnit: String, CaseIterable, Identifiable {
+    case celsius
+    case fahrenheit
+
+    var id: String { rawValue }
+
+    func title(in language: AppLanguage) -> String {
+        switch self {
+        case .celsius:
+            return language.text("摄氏度°C", "Celsius °C")
+        case .fahrenheit:
+            return language.text("华氏度°F", "Fahrenheit °F")
+        }
+    }
+
+    func format(_ celsius: Double?) -> String {
+        guard let celsius else { return "--" }
+        switch self {
+        case .celsius:
+            return String(format: "%.1f °C", celsius)
+        case .fahrenheit:
+            return String(format: "%.1f °F", celsius * 9.0 / 5.0 + 32.0)
+        }
+    }
+}
+
 private struct AppLanguageKey: EnvironmentKey {
     static let defaultValue: AppLanguage = .chinese
+}
+
+private struct TemperatureUnitKey: EnvironmentKey {
+    static let defaultValue: TemperatureUnit = .celsius
 }
 
 extension EnvironmentValues {
     var appLanguage: AppLanguage {
         get { self[AppLanguageKey.self] }
         set { self[AppLanguageKey.self] = newValue }
+    }
+
+    var temperatureUnit: TemperatureUnit {
+        get { self[TemperatureUnitKey.self] }
+        set { self[TemperatureUnitKey.self] = newValue }
     }
 }
 
@@ -234,6 +269,7 @@ enum PerfSelection: Hashable, Identifiable {
     case network(String)
     case npu(String)
     case gpu(String)
+    case thermal
 
     var id: String {
         switch self {
@@ -249,6 +285,8 @@ enum PerfSelection: Hashable, Identifiable {
             "npu-\(npuID)"
         case .gpu(let gpuID):
             "gpu-\(gpuID)"
+        case .thermal:
+            "thermal"
         }
     }
 }
@@ -269,6 +307,11 @@ enum GPUGraphLayoutMode {
     case multiEngine
 }
 
+enum NPUGraphLayoutMode {
+    case singleEngine
+    case multiEngine
+}
+
 enum GPUGraphKind: String, CaseIterable, Identifiable {
     case overall = "Overall"
     case threeD = "3D"
@@ -281,6 +324,28 @@ enum GPUGraphKind: String, CaseIterable, Identifiable {
         case .overall: language.text("总体", "Overall")
         case .threeD: "3D"
         case .tilerCopy: language.text("Tiler/Copy", "Tiler/Copy")
+        }
+    }
+}
+
+enum NPUGraphKind: String, CaseIterable, Identifiable {
+    case active = "Active"
+    case power = "Power"
+    case dataMovement = "Data"
+    case memory = "Memory"
+
+    var id: String { rawValue }
+
+    func title(in language: AppLanguage) -> String {
+        switch self {
+        case .active:
+            return language.text("活跃度", "Activity")
+        case .power:
+            return language.text("功耗", "Power")
+        case .dataMovement:
+            return language.text("数据搬运", "Data movement")
+        case .memory:
+            return language.text("共享内存", "Shared memory")
         }
     }
 }
@@ -409,6 +474,8 @@ struct DiskState: Identifiable {
     var readBytesPerSecond: UInt64
     var writeBytesPerSecond: UInt64
     var activityHistory: [Double]
+    var readHistory: [Double]
+    var writeHistory: [Double]
     var transferHistory: [Double]
     var transferChartCeilingBytesPerSecond: Double
 }
@@ -438,6 +505,8 @@ struct NetworkState: Identifiable {
     var statusText: String
     var totalHistory: [Double]
     var detailHistory: [Double]
+    var sendHistory: [Double]
+    var receiveHistory: [Double]
     var chartCeilingBytesPerSecond: Double
 }
 
@@ -474,12 +543,45 @@ struct NPUState: Identifiable {
     var currentPowerState: Int
     var maxPowerState: Int
     var activeClientCount: Int
-    var utilizationPercent: Double
+    var activeTimePercent: Double
+    var powerWatts: Double
+    var peakPowerWatts: Double
+    var dataReadBytesPerSecond: UInt64
+    var dataWriteBytesPerSecond: UInt64
+    var dataMovementBytesPerSecond: UInt64
+    var peakDataMovementBytesPerSecond: UInt64
     var neuralFootprintBytes: UInt64
     var peakNeuralFootprintBytes: UInt64
-    var historyCompute: [Double]
+    var historyActiveTime: [Double]
+    var historyPowerWatts: [Double]
+    var historyDataMovementBytes: [Double]
     var historyFootprint: [Double]
     var historyMemoryPressure: [Double]
+}
+
+struct ThermalState {
+    var title: String = "散热"
+    var subtitle: String = "--"
+    var statusText: String = "--"
+    var currentFanRPM: UInt32 = 0
+    var peakFanRPM: UInt32 = 0
+    var maximumFanRPM: UInt32 = 6000
+    var cpuTemperatureCelsius: Double? = nil
+    var efficiencyCoreTemperatureCelsius: Double? = nil
+    var performanceCoreTemperatureCelsius: Double? = nil
+    var gpuTemperatureCelsius: Double? = nil
+    var diskTemperatureCelsius: Double? = nil
+    var networkTemperatureCelsius: Double? = nil
+    var logicBoardTemperatureCelsius: Double? = nil
+    var socTemperatureCelsius: Double? = nil
+    var powerSupplyTemperatureCelsius: Double? = nil
+    var powerSurfaceTemperatureCelsius: Double? = nil
+    var enclosureTemperatureCelsius: Double? = nil
+    var systemTemperatureCelsius: Double? = nil
+    var historyFanRPM: [Double] = Array(repeating: 0, count: 60)
+    var fanChartCeilingRPM: Double = 1000
+    var historyNetworkTemperatureCelsius: [Double] = Array(repeating: 0, count: 60)
+    var networkTemperatureChartCeilingCelsius: Double = 50
 }
 
 struct PerfSidebarItem: Identifiable {
@@ -544,6 +646,13 @@ enum DisplayFormat {
         }
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.1f MB", mb)
+    }
+
+    static func watts(_ value: Double) -> String {
+        if value >= 10 {
+            return String(format: "%.1f W", value)
+        }
+        return String(format: "%.2f W", value)
     }
 
     static func throughput(_ bytesPerSecond: UInt64) -> String {
