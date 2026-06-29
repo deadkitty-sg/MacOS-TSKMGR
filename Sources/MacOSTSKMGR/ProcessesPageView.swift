@@ -93,7 +93,7 @@ struct ProcessesPageView: View {
             tableMetricHeader(diskBusyLabel, label: language.text("磁盘", "Disk"), sortKey: .disk, width: widths.width(for: .disk))
             tableMetricHeader(networkBusyLabel, label: language.text("网络", "Network"), sortKey: .network, width: widths.width(for: .network))
             tableCellHeader(language.text("电源使用情况", "Power usage"), sortKey: .power, width: widths.width(for: .power), background: AppTheme.tableHeader(colorScheme), align: .leading)
-            tableCellHeader(language.text("电源使用情况…", "Power trend"), sortKey: .trend, width: widths.width(for: .trend), background: AppTheme.tableHeader(colorScheme), align: .leading)
+            tableCellHeader(language.text("电源使用情况趋势", "Power trend"), sortKey: .trend, width: widths.width(for: .trend), background: AppTheme.tableHeader(colorScheme), align: .leading)
         }
         .frame(height: ProcessColumnLayout.headerHeight)
         .background(AppTheme.tableHeaderStrong(colorScheme))
@@ -211,8 +211,8 @@ struct ProcessesPageView: View {
             rowMetricCell(memoryText(for: row), width: widths.width(for: .memory))
             rowMetricCell(diskText(for: row), width: widths.width(for: .disk))
             rowMetricCell(networkText(for: row), width: widths.width(for: .network))
-            rowMetricCell(row.powerImpact, width: widths.width(for: .power))
-            rowMetricCell(row.trend, width: widths.width(for: .trend))
+            rowMetricCell(localizedImpactText(row.powerImpact), width: widths.width(for: .power))
+            rowMetricCell(localizedImpactText(row.trend), width: widths.width(for: .trend))
         }
         .frame(height: ProcessColumnLayout.rowHeight)
         .background(processRowBackground(row, rowIndex: rowIndex))
@@ -257,6 +257,10 @@ struct ProcessesPageView: View {
             .overlay(alignment: .trailing) {
                 Rectangle().fill(AppTheme.separator(colorScheme)).frame(width: 1)
             }
+    }
+
+    private func localizedImpactText(_ value: String) -> String {
+        language.localizeImpact(value)
     }
 
     private func rowMetricCell(_ value: String, width: CGFloat) -> some View {
@@ -325,9 +329,9 @@ struct ProcessesPageView: View {
         case .network:
             result = lhs.networkBytesPerSecond < rhs.networkBytesPerSecond
         case .power:
-            result = lhs.powerImpact.localizedStandardCompare(rhs.powerImpact) == .orderedAscending
+            result = lhs.powerUsageWatts < rhs.powerUsageWatts
         case .trend:
-            result = lhs.trend.localizedStandardCompare(rhs.trend) == .orderedAscending
+            result = lhs.powerTrendWatts < rhs.powerTrendWatts
         }
         return ascending ? result : !result
     }

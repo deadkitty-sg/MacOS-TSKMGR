@@ -12,6 +12,7 @@ struct GridChart: View {
     var fillOpacityMultiplier: Double = 1
     var minimumVisibleRatio: Double = 0
     var dash: [CGFloat] = []
+    var contentInset: CGFloat = 0
 
     private var normalized: [CGPoint] {
         guard !values.isEmpty else { return [] }
@@ -31,18 +32,22 @@ struct GridChart: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
+                let inset = max(contentInset, lineWidth / 2)
+                let chartWidth = max(proxy.size.width - inset * 2, 0)
+                let chartHeight = max(proxy.size.height - inset * 2, 0)
+
                 Path { path in
-                    let width = proxy.size.width
-                    let height = proxy.size.height
+                    let width = chartWidth
+                    let height = chartHeight
                     for step in 0...verticalSteps {
-                        let x = width * CGFloat(step) / CGFloat(verticalSteps)
-                        path.move(to: CGPoint(x: x, y: 0))
-                        path.addLine(to: CGPoint(x: x, y: height))
+                        let x = inset + width * CGFloat(step) / CGFloat(max(verticalSteps, 1))
+                        path.move(to: CGPoint(x: x, y: inset))
+                        path.addLine(to: CGPoint(x: x, y: inset + height))
                     }
                     for step in 0...horizontalSteps {
-                        let y = height * CGFloat(step) / CGFloat(horizontalSteps)
-                        path.move(to: CGPoint(x: 0, y: y))
-                        path.addLine(to: CGPoint(x: width, y: y))
+                        let y = inset + height * CGFloat(step) / CGFloat(max(horizontalSteps, 1))
+                        path.move(to: CGPoint(x: inset, y: y))
+                        path.addLine(to: CGPoint(x: inset + width, y: y))
                     }
                 }
                 .stroke(AppTheme.chartGrid(colorScheme, accent: color), lineWidth: 0.7)
@@ -50,12 +55,12 @@ struct GridChart: View {
                 if filled {
                     Path { path in
                         guard let first = normalized.first else { return }
-                        path.move(to: CGPoint(x: 0, y: proxy.size.height))
-                        path.addLine(to: CGPoint(x: first.x * proxy.size.width, y: proxy.size.height * (1 - first.y)))
+                        path.move(to: CGPoint(x: inset, y: inset + chartHeight))
+                        path.addLine(to: CGPoint(x: inset + first.x * chartWidth, y: inset + chartHeight * (1 - first.y)))
                         for point in normalized {
-                            path.addLine(to: CGPoint(x: point.x * proxy.size.width, y: proxy.size.height * (1 - point.y)))
+                            path.addLine(to: CGPoint(x: inset + point.x * chartWidth, y: inset + chartHeight * (1 - point.y)))
                         }
-                        path.addLine(to: CGPoint(x: proxy.size.width, y: proxy.size.height))
+                        path.addLine(to: CGPoint(x: inset + chartWidth, y: inset + chartHeight))
                         path.closeSubpath()
                     }
                     .fill(AppTheme.chartFill(colorScheme, accent: color).opacity(fillOpacityMultiplier))
@@ -63,13 +68,14 @@ struct GridChart: View {
 
                 Path { path in
                     guard let first = normalized.first else { return }
-                    path.move(to: CGPoint(x: first.x * proxy.size.width, y: proxy.size.height * (1 - first.y)))
+                    path.move(to: CGPoint(x: inset + first.x * chartWidth, y: inset + chartHeight * (1 - first.y)))
                     for point in normalized.dropFirst() {
-                        path.addLine(to: CGPoint(x: point.x * proxy.size.width, y: proxy.size.height * (1 - point.y)))
+                        path.addLine(to: CGPoint(x: inset + point.x * chartWidth, y: inset + chartHeight * (1 - point.y)))
                     }
                 }
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, dash: dash))
             }
+            .clipShape(Rectangle())
         }
     }
 }
@@ -84,6 +90,7 @@ struct DualLineGridChart: View {
     var lineWidth: CGFloat = 1.1
     var ceiling: Double = 100
     var primaryFilled: Bool = true
+    var contentInset: CGFloat = 0
 
     private func normalizedPoints(for values: [Double]) -> [CGPoint] {
         guard !values.isEmpty else { return [] }
@@ -99,18 +106,22 @@ struct DualLineGridChart: View {
 
         return GeometryReader { proxy in
             ZStack {
+                let inset = max(contentInset, lineWidth / 2)
+                let chartWidth = max(proxy.size.width - inset * 2, 0)
+                let chartHeight = max(proxy.size.height - inset * 2, 0)
+
                 Path { path in
-                    let width = proxy.size.width
-                    let height = proxy.size.height
+                    let width = chartWidth
+                    let height = chartHeight
                     for step in 0...verticalSteps {
-                        let x = width * CGFloat(step) / CGFloat(verticalSteps)
-                        path.move(to: CGPoint(x: x, y: 0))
-                        path.addLine(to: CGPoint(x: x, y: height))
+                        let x = inset + width * CGFloat(step) / CGFloat(max(verticalSteps, 1))
+                        path.move(to: CGPoint(x: x, y: inset))
+                        path.addLine(to: CGPoint(x: x, y: inset + height))
                     }
                     for step in 0...horizontalSteps {
-                        let y = height * CGFloat(step) / CGFloat(horizontalSteps)
-                        path.move(to: CGPoint(x: 0, y: y))
-                        path.addLine(to: CGPoint(x: width, y: y))
+                        let y = inset + height * CGFloat(step) / CGFloat(max(horizontalSteps, 1))
+                        path.move(to: CGPoint(x: inset, y: y))
+                        path.addLine(to: CGPoint(x: inset + width, y: y))
                     }
                 }
                 .stroke(AppTheme.chartGrid(colorScheme, accent: color), lineWidth: 0.7)
@@ -118,12 +129,12 @@ struct DualLineGridChart: View {
                 if primaryFilled {
                     Path { path in
                         guard let first = primary.first else { return }
-                        path.move(to: CGPoint(x: 0, y: proxy.size.height))
-                        path.addLine(to: CGPoint(x: first.x * proxy.size.width, y: proxy.size.height * (1 - first.y)))
+                        path.move(to: CGPoint(x: inset, y: inset + chartHeight))
+                        path.addLine(to: CGPoint(x: inset + first.x * chartWidth, y: inset + chartHeight * (1 - first.y)))
                         for point in primary {
-                            path.addLine(to: CGPoint(x: point.x * proxy.size.width, y: proxy.size.height * (1 - point.y)))
+                            path.addLine(to: CGPoint(x: inset + point.x * chartWidth, y: inset + chartHeight * (1 - point.y)))
                         }
-                        path.addLine(to: CGPoint(x: proxy.size.width, y: proxy.size.height))
+                        path.addLine(to: CGPoint(x: inset + chartWidth, y: inset + chartHeight))
                         path.closeSubpath()
                     }
                     .fill(AppTheme.chartFill(colorScheme, accent: color).opacity(1))
@@ -131,22 +142,23 @@ struct DualLineGridChart: View {
 
                 Path { path in
                     guard let first = primary.first else { return }
-                    path.move(to: CGPoint(x: first.x * proxy.size.width, y: proxy.size.height * (1 - first.y)))
+                    path.move(to: CGPoint(x: inset + first.x * chartWidth, y: inset + chartHeight * (1 - first.y)))
                     for point in primary.dropFirst() {
-                        path.addLine(to: CGPoint(x: point.x * proxy.size.width, y: proxy.size.height * (1 - point.y)))
+                        path.addLine(to: CGPoint(x: inset + point.x * chartWidth, y: inset + chartHeight * (1 - point.y)))
                     }
                 }
                 .stroke(color, lineWidth: lineWidth)
 
                 Path { path in
                     guard let first = secondary.first else { return }
-                    path.move(to: CGPoint(x: first.x * proxy.size.width, y: proxy.size.height * (1 - first.y)))
+                    path.move(to: CGPoint(x: inset + first.x * chartWidth, y: inset + chartHeight * (1 - first.y)))
                     for point in secondary.dropFirst() {
-                        path.addLine(to: CGPoint(x: point.x * proxy.size.width, y: proxy.size.height * (1 - point.y)))
+                        path.addLine(to: CGPoint(x: inset + point.x * chartWidth, y: inset + chartHeight * (1 - point.y)))
                     }
                 }
                 .stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: lineWidth, dash: [4, 2]))
             }
+            .clipShape(Rectangle())
         }
     }
 }

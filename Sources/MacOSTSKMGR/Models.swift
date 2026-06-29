@@ -24,6 +24,20 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizeImpact(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Very high": return "非常高"
+            case "High": return "高"
+            case "Moderate": return "中"
+            case "Low": return "低"
+            case "Very low": return "非常低"
+            default: return value
+            }
+        }
+        return translateImpact(value)
+    }
+
     func translateProcessSectionTitle(_ title: String) -> String {
         guard !isChinese else { return title }
         if title.hasPrefix("应用 (") {
@@ -43,12 +57,34 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizeStartupStatus(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Enabled": return "已启用"
+            case "Disabled": return "已禁用"
+            default: return value
+            }
+        }
+        return translateStartupStatus(value)
+    }
+
     func translateStartupImpact(_ value: String) -> String {
         switch value {
         case "高": return "High"
         case "未计算": return "N/A"
         default: return translateImpact(value)
         }
+    }
+
+    func localizeStartupImpact(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "High": return "高"
+            case "N/A": return "未计算"
+            default: return localizeImpact(value)
+            }
+        }
+        return translateStartupImpact(value)
     }
 
     func translateDirectoryLabel(_ value: String) -> String {
@@ -59,6 +95,19 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         case "用户代理": return "User agent"
         default: return value
         }
+    }
+
+    func localizeDirectoryLabel(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Login item": return "登录项"
+            case "System daemon": return "系统守护进程"
+            case "System agent": return "系统代理"
+            case "User agent": return "用户代理"
+            default: return value
+            }
+        }
+        return translateDirectoryLabel(value)
     }
 
     func translateServiceStatus(_ value: String) -> String {
@@ -73,6 +122,21 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizeServiceStatus(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Running": return "正在运行"
+            case "On demand": return "按需"
+            case "Loaded": return "已加载"
+            case "Stopped": return "已停止"
+            case "Not loaded": return "未加载"
+            case "Disabled": return "已禁用"
+            default: return value
+            }
+        }
+        return translateServiceStatus(value)
+    }
+
     func translateProcessStatus(_ value: String) -> String {
         switch value {
         case "正在创建": return "Starting"
@@ -85,12 +149,38 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizeProcessStatus(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Starting": return "正在创建"
+            case "Running": return "正在运行"
+            case "Sleeping": return "正在睡眠"
+            case "Stopped": return "已停止"
+            case "Zombie": return "僵尸"
+            case "Unknown": return "未知"
+            default: return value
+            }
+        }
+        return translateProcessStatus(value)
+    }
+
     func translatePlatform(_ value: String) -> String {
         switch value {
         case "64位": return "64-bit"
         case "32位": return "32-bit"
         default: return value
         }
+    }
+
+    func localizePlatform(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "64-bit": return "64位"
+            case "32-bit": return "32位"
+            default: return value
+            }
+        }
+        return translatePlatform(value)
     }
 
     func translateDiskKind(_ value: String) -> String {
@@ -100,6 +190,18 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         case "外建": return "External"
         default: return value
         }
+    }
+
+    func localizeDiskKind(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Removable": return "可移动"
+            case "Internal": return "内建"
+            case "External": return "外建"
+            default: return value
+            }
+        }
+        return translateDiskKind(value)
     }
 
     func translateNetworkMedium(_ value: String) -> String {
@@ -112,10 +214,55 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizeNetworkMedium(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Ethernet": return "以太网"
+            case "VPN tunnel": return "VPN隧道"
+            case "Virtual network": return "虚拟网络"
+            case "Network interface": return "网络接口"
+            case "Virtual": return "虚拟"
+            default: return value
+            }
+        }
+        return translateNetworkMedium(value)
+    }
+
     func translateDiskTitle(_ value: String) -> String {
         guard !isChinese else { return value }
         if value.hasPrefix("磁盘 ") {
             return value.replacingOccurrences(of: "磁盘", with: "Disk")
+        }
+        return value
+    }
+
+    func localizeDiskTitle(_ value: String) -> String {
+        if isChinese {
+            if value.hasPrefix("Disk ") {
+                return value.replacingOccurrences(of: "Disk", with: "磁盘")
+            }
+            return value
+        }
+        return translateDiskTitle(value)
+    }
+
+    func localizeRuntimeMessage(_ value: String) -> String {
+        if isChinese {
+            switch value {
+            case "Unable to end this task.": return "不能结束该任务。"
+            case "Unable to end Task Manager itself.": return "不能结束当前任务管理器自身。"
+            case "Permission denied. Unable to end this task.": return "权限不足，无法结束该任务。"
+            case "Invalid end-task request.": return "结束任务请求无效。"
+            case "This task no longer exists.": return "该任务已不存在。"
+            case "Incorrect password.": return "密码不正确。"
+            case "Task execution failed.": return "任务执行失败。"
+            case "Unable to open application.": return "无法打开应用程序。"
+            default:
+                if value.hasPrefix("Unable to start task: ") {
+                    return value.replacingOccurrences(of: "Unable to start task:", with: "无法启动任务：")
+                }
+                return value
+            }
         }
         return value
     }
@@ -364,6 +511,8 @@ struct ProcessRowData: Identifiable {
     let diskBytesPerSecond: UInt64
     let networkBytesPerSecond: UInt64
     let networkText: String
+    let powerUsageWatts: Double
+    let powerTrendWatts: Double
     let powerImpact: String
     let trend: String
     let threadCount: Int
@@ -429,6 +578,14 @@ struct DetailProcessRowData: Identifiable {
     let platform: String
 }
 
+enum AppleSiliconCoreTierMode {
+    case performanceEfficiency
+    case superPerformance
+    case superEfficiency
+    case genericPrimarySecondary
+    case singlePerformanceTier
+}
+
 struct CPUState {
     var modelName: String = "Apple Silicon"
     var utilizationPercent: Double = 0
@@ -436,6 +593,7 @@ struct CPUState {
     var baseSpeedText: String = "--"
     var performanceCoreSpeedText: String = "--"
     var efficiencyCoreSpeedText: String = "--"
+    var coreTierMode: AppleSiliconCoreTierMode = .singlePerformanceTier
     var logicalCores: Int = 0
     var physicalCores: Int = 0
     var processCount: Int = 0
@@ -560,7 +718,7 @@ struct NPUState: Identifiable {
 }
 
 struct ThermalState {
-    var title: String = "散热"
+    var title: String = "Cooling"
     var subtitle: String = "--"
     var statusText: String = "--"
     var currentFanRPM: UInt32 = 0
@@ -657,14 +815,14 @@ enum DisplayFormat {
 
     static func throughput(_ bytesPerSecond: UInt64) -> String {
         if bytesPerSecond == 0 {
-            return "0 KB/秒"
+            return "0 KB/s"
         }
         let kb = Double(bytesPerSecond) / 1024
         if kb < 1024 {
-            return String(format: "%.1f KB/秒", kb)
+            return String(format: "%.1f KB/s", kb)
         }
         let mb = kb / 1024
-        return String(format: "%.1f MB/秒", mb)
+        return String(format: "%.1f MB/s", mb)
     }
 
     static func networkRate(_ bytesPerSecond: UInt64) -> String {
@@ -714,5 +872,23 @@ enum DisplayFormat {
 
     static func impactLabel(cpuPercent: Double, language: AppLanguage) -> String {
         language.translateImpact(impactLabel(cpuPercent: cpuPercent))
+    }
+
+    static func impactLabel(powerUsageWatts: Double, wakeupsPerSecond: Double, language: AppLanguage) -> String {
+        let score = powerUsageWatts * 1000.0 + wakeupsPerSecond * 0.6
+        let label: String
+        switch score {
+        case 120...:
+            label = "非常高"
+        case 45..<120:
+            label = "高"
+        case 12..<45:
+            label = "中"
+        case 2.5..<12:
+            label = "低"
+        default:
+            label = "非常低"
+        }
+        return language.translateImpact(label)
     }
 }

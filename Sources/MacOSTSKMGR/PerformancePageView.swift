@@ -159,7 +159,7 @@ struct PerformancePageView: View {
     private func sidebarRow(_ item: PerfSidebarItem, summaryMode: Bool) -> some View {
         HStack(spacing: 10) {
             if showsGraphs {
-                GridChart(values: item.sparkline, color: item.accent, verticalSteps: 0, horizontalSteps: 0, lineWidth: 1.1, filled: true, ceiling: 100)
+                GridChart(values: item.sparkline, color: item.accent, verticalSteps: 0, horizontalSteps: 0, lineWidth: 1.1, filled: true, ceiling: 100, contentInset: 1.2)
                     .frame(width: 58, height: 42)
                     .overlay(Rectangle().stroke(item.accent, lineWidth: 1))
             } else {

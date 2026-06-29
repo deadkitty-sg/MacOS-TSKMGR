@@ -60,7 +60,7 @@ struct ServicesPageView: View {
                                 nameRowCell(row, width: widths.name)
                                 rowCell(row.pid.map(String.init) ?? "", width: widths.pid)
                                 rowCell(row.serviceDescription, width: widths.description)
-                                rowCell(language.isChinese ? row.status : language.translateServiceStatus(row.status), width: widths.status)
+                                rowCell(language.localizeServiceStatus(row.status), width: widths.status)
                                 rowCell(row.group, width: widths.group)
                             }
                             .frame(height: ServicesColumnLayout.rowHeight)
@@ -181,7 +181,7 @@ struct ServicesPageView: View {
     }
 
     private func serviceStatusRank(_ status: String) -> Int {
-        switch language.translateServiceStatus(status) {
+        switch language.translateServiceStatus(language.localizeServiceStatus(status)) {
         case "Running": return 0
         case "On demand": return 1
         case "Loaded": return 2
@@ -232,15 +232,17 @@ struct ServicesPageView: View {
     }
 
     private func canStart(_ row: ServiceRowData) -> Bool {
-        row.status == "已停止" || row.status == "未加载" || row.status == "已禁用"
+        let localized = language.localizeServiceStatus(row.status)
+        return localized == "已停止" || localized == "未加载" || localized == "已禁用"
     }
 
     private func canStop(_ row: ServiceRowData) -> Bool {
-        row.status == "正在运行" || row.status == "按需" || row.status == "已加载"
+        let localized = language.localizeServiceStatus(row.status)
+        return localized == "正在运行" || localized == "按需" || localized == "已加载"
     }
 
     private func canRestart(_ row: ServiceRowData) -> Bool {
-        row.status == "正在运行"
+        language.localizeServiceStatus(row.status) == "正在运行"
     }
 }
 

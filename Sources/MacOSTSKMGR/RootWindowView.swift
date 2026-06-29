@@ -19,7 +19,7 @@ struct RootWindowView: View {
     @StateObject private var newTaskPanelManager = NewTaskPanelManager()
     @StateObject private var networkDetailsPanelManager = NetworkDetailsPanelManager()
     @StateObject private var aboutPanelManager = AboutPanelManager()
-    @State private var language: AppLanguage = .chinese
+    @State private var language: AppLanguage = Self.defaultLanguageFromSystem()
     @State private var temperatureUnit: TemperatureUnit = .celsius
     @State private var selectedTab: TaskTab = .processes
     @State private var selectedPerf: PerfSelection = .cpu
@@ -195,7 +195,7 @@ struct RootWindowView: View {
                 taskActionErrorMessage = ""
             }
         } message: {
-            Text(taskActionErrorMessage)
+            Text(language.localizeRuntimeMessage(taskActionErrorMessage))
         }
         .background(MenuKeyHandlingView(
             onAltF: { openMenu(.file) },
@@ -238,6 +238,7 @@ struct RootWindowView: View {
             reconcileTemperatureUnitSubmenuVisibility()
         }
         .onAppear {
+            applySystemPresentationPreferences()
             let mode = currentWindowPresentationMode
             lastWindowPresentationMode = mode
             resizeWindowForCurrentMode(animated: false)
@@ -271,8 +272,23 @@ struct RootWindowView: View {
             monitor.start()
             updateWindowTrafficLights()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
+            applySystemPresentationPreferences()
+        }
         .environment(\.appLanguage, language)
         .environment(\.temperatureUnit, temperatureUnit)
+    }
+
+    private static func defaultLanguageFromSystem() -> AppLanguage {
+        let preferredLanguage = Locale.preferredLanguages.first?.lowercased() ?? ""
+        return preferredLanguage.hasPrefix("zh-hans") ? .chinese : .english
+    }
+
+    private func applySystemPresentationPreferences() {
+        let systemLanguage = Self.defaultLanguageFromSystem()
+        if language != systemLanguage {
+            language = systemLanguage
+        }
     }
 
     private var compactApplicationRows: [ProcessRowData] {
@@ -783,6 +799,8 @@ struct RootWindowView: View {
                 diskBytesPerSecond: 0,
                 networkBytesPerSecond: 0,
                 networkText: "0 Mbps",
+                powerUsageWatts: 0,
+                powerTrendWatts: 0,
                 powerImpact: "",
                 trend: "",
                 threadCount: info.threadCount,
@@ -956,7 +974,7 @@ struct WindowSurfaceBackground: View {
             )
 
             VisualEffectBlur(material: .underWindowBackground, blendingMode: .behindWindow)
-                .opacity(0.82)
+                .opacity(colorScheme == .dark ? 0.82 : 0.92)
 
             LinearGradient(
                 colors: [
@@ -966,6 +984,10 @@ struct WindowSurfaceBackground: View {
                 startPoint: .top,
                 endPoint: .center
             )
+
+            if colorScheme == .light {
+                Color.white.opacity(0.18)
+            }
         }
         .ignoresSafeArea()
     }
@@ -1106,7 +1128,7 @@ struct FooterBarView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(AppTheme.secondaryText(colorScheme))
                         )
-                    Text(compactMode ? language.text("详细信息(D)", "Fewer details(D)") : language.text("简略信息(D)", "Fewer details(D)"))
+                    Text(compactMode ? language.text("详细信息(D)", "More details(D)") : language.text("简略信息(D)", "Fewer details(D)"))
                         .font(.system(size: 13))
                 }
             }
@@ -1263,7 +1285,7 @@ struct CompactModeFooter: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(AppTheme.secondaryText(colorScheme))
                         )
-                    Text(language.text("详细信息(D)", "Fewer details(D)"))
+                    Text(language.text("详细信息(D)", "More details(D)"))
                         .font(.system(size: 13))
                 }
             }
@@ -1346,7 +1368,7 @@ struct NewTaskPanelView: View {
             }
 
             if !errorMessage.isEmpty {
-                Text(errorMessage)
+                Text(language.localizeRuntimeMessage(errorMessage))
                     .font(.system(size: 12))
                     .foregroundStyle(.red)
             }
@@ -1737,12 +1759,12 @@ enum TaskTerminateResult {
 enum TaskTerminator {
     static func terminate(pid: Int32) -> TaskTerminateResult {
         guard pid > 1 else {
-            return .failure("不能结束该任务。")
+            return .failure("Unable to end this task.")
         }
 
         let ownPID = Int32(ProcessInfo.processInfo.processIdentifier)
         guard pid != ownPID else {
-            return .failure("不能结束当前任务管理器自身。")
+            return .failure("Unable to end Task Manager itself.")
         }
 
         if kill(pid, SIGTERM) == 0 {
@@ -1769,11 +1791,11 @@ enum TaskTerminator {
     private static func terminationErrorMessage(errnoValue: Int32) -> String {
         switch errnoValue {
         case EPERM:
-            return "权限不足，无法结束该任务。"
+            return "Permission denied. Unable to end this task."
         case EINVAL:
-            return "结束任务请求无效。"
+            return "Invalid end-task request."
         case ESRCH:
-            return "该任务已不存在。"
+            return "This task no longer exists."
         default:
             return String(cString: strerror(errnoValue))
         }
@@ -1804,7 +1826,7 @@ enum TaskRunner {
         do {
             try process.run()
         } catch {
-            return .failure("无法启动任务：\(error.localizedDescription)")
+            return .failure("Unable to start task: \(error.localizedDescription)")
         }
 
         if asAdmin {
@@ -1824,11 +1846,11 @@ enum TaskRunner {
         }
 
         if asAdmin && errorText.localizedCaseInsensitiveContains("incorrect password") {
-            return .failure("密码不正确。")
+            return .failure("Incorrect password.")
         }
 
         if errorText.isEmpty {
-            return .failure("任务执行失败。")
+            return .failure("Task execution failed.")
         }
 
         return .failure(errorText)
@@ -1865,7 +1887,7 @@ enum TaskRunner {
             }
         }
 
-        return openResult ? .success : .failure("无法打开应用程序。")
+        return openResult ? .success : .failure("Unable to open application.")
     }
 }
 

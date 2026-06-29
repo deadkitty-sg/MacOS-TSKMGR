@@ -59,9 +59,9 @@ struct StartupPageView: View {
                         ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
                             HStack(spacing: 0) {
                                 nameRowCell(row, width: widths.name)
-                                rowCell(language.isChinese ? row.publisher : language.translateDirectoryLabel(row.publisher), width: widths.publisher, align: .leading)
+                                rowCell(language.localizeDirectoryLabel(row.publisher), width: widths.publisher, align: .leading)
                                 rowCell(statusText(for: row), width: widths.status, align: .leading)
-                                rowCell(language.isChinese ? row.startupImpact : language.translateStartupImpact(row.startupImpact), width: widths.impact, align: .leading)
+                                rowCell(language.localizeStartupImpact(row.startupImpact), width: widths.impact, align: .leading)
                             }
                             .frame(height: StartupColumnLayout.rowHeight)
                             .background(startupRowBackground(row, rowIndex: index))
@@ -184,11 +184,11 @@ struct StartupPageView: View {
 
     private func statusText(for row: StartupItemRowData) -> String {
         let raw = isDisabled(row) ? language.text("已禁用", "Disabled") : row.status
-        return language.isChinese ? raw : language.translateStartupStatus(raw)
+        return language.localizeStartupStatus(raw)
     }
 
     private func isDisabled(_ row: StartupItemRowData) -> Bool {
-        row.status == "已禁用"
+        language.localizeStartupStatus(row.status) == "已禁用"
     }
 
     private func toggleMenuTitle(for row: StartupItemRowData) -> String {

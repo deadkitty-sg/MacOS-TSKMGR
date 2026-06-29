@@ -71,11 +71,11 @@ struct DetailsPageView: View {
                             HStack(spacing: 0) {
                                 nameRowCell(row, width: widths.name)
                                 rowCell("\(row.pid)", width: widths.pid)
-                                rowCell(language.isChinese ? row.status : language.translateProcessStatus(row.status), width: widths.status)
+                                rowCell(language.localizeProcessStatus(row.status), width: widths.status)
                                 rowCell(row.userName, width: widths.user)
                                 rowCell(DisplayFormat.percentWithPrecision(row.cpuPercent, digits: 1), width: widths.cpu)
                                 rowCell(memoryText(for: row), width: widths.memory)
-                                rowCell(language.isChinese ? row.platform : language.translatePlatform(row.platform), width: widths.platform)
+                                rowCell(language.localizePlatform(row.platform), width: widths.platform)
                             }
                             .frame(height: DetailsColumnLayout.rowHeight)
                             .background(detailsRowBackground(row, rowIndex: index))
@@ -260,6 +260,8 @@ struct DetailsPageView: View {
             diskBytesPerSecond: 0,
             networkBytesPerSecond: 0,
             networkText: "0 Mbps",
+            powerUsageWatts: 0,
+            powerTrendWatts: 0,
             powerImpact: "",
             trend: "",
             threadCount: 0,

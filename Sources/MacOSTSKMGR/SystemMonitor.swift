@@ -619,6 +619,10 @@ final class SystemMonitor: ObservableObject {
     private var previousPerCoreLoads: [[UInt32]] = []
     private var previousProcessCPUTime: [Int32: UInt64] = [:]
     private var previousProcessRUsage: [Int32: (read: UInt64, write: UInt64)] = [:]
+    private var previousProcessEnergyNanojoules: [Int32: UInt64] = [:]
+    private var previousProcessPackageIdleWakeups: [Int32: UInt64] = [:]
+    private var previousProcessInterruptWakeups: [Int32: UInt64] = [:]
+    private var processPowerTrendWatts: [Int32: Double] = [:]
     private var previousProcessNetworkTotals: [Int32: UInt64] = [:]
     private var previousProcessMeteredNetworkTotals: [Int32: UInt64] = [:]
     private var appHistoryCPUBaseline: [Int32: Double] = [:]
@@ -723,7 +727,9 @@ final class SystemMonitor: ObservableObject {
         })
 
         items.append(contentsOf: networks.map { network in
-            let subtitle = language.isChinese && network.subtitle == "Wi-Fi" ? "WLAN" : network.subtitle
+            let subtitle = language.isChinese && network.subtitle == "Wi-Fi"
+                ? "WLAN"
+                : language.localizeNetworkMedium(network.subtitle)
             return PerfSidebarItem(
                 id: .network(network.id),
                 title: network.displayName,
@@ -765,9 +771,9 @@ final class SystemMonitor: ObservableObject {
         items.append(
             PerfSidebarItem(
                 id: .thermal,
-                title: language.text("散热", "Thermal"),
-                subtitle: thermal.subtitle,
-                tertiary: thermal.statusText,
+                title: language.text("散热", "Cooling"),
+                subtitle: language.isChinese ? thermal.subtitle : thermal.subtitle.replacingOccurrences(of: "温度", with: "Temperature"),
+                tertiary: language.text(thermal.statusText, thermalStatusEnglish(from: thermal.statusText)),
                 accent: Color(red: 0.33, green: 0.73, blue: 0.25),
                 sparkline: thermal.historyFanRPM.map { min($0 / max(thermal.fanChartCeilingRPM, 1) * 100.0, 100.0) },
                 selectedFill: Color(red: 0.62, green: 0.82, blue: 1.0).opacity(0.45)
@@ -807,8 +813,9 @@ final class SystemMonitor: ObservableObject {
         cpuArchitecture = resolveCPUArchitecture()
         let frequencyInfo = detectCPUFrequencyInfo()
         cpu.baseSpeedText = frequencyInfo.base
-        cpu.performanceCoreSpeedText = frequencyInfo.performance
-        cpu.efficiencyCoreSpeedText = frequencyInfo.efficiency
+        cpu.performanceCoreSpeedText = frequencyInfo.primary
+        cpu.efficiencyCoreSpeedText = frequencyInfo.secondary
+        cpu.coreTierMode = frequencyInfo.mode
         loadCachePresentation()
     }
 
@@ -1169,6 +1176,10 @@ final class SystemMonitor: ObservableObject {
 
         var newCPUCache: [Int32: UInt64] = [:]
         var newRUsageCache: [Int32: (UInt64, UInt64)] = [:]
+        var newEnergyCache: [Int32: UInt64] = [:]
+        var newPackageWakeupCache: [Int32: UInt64] = [:]
+        var newInterruptWakeupCache: [Int32: UInt64] = [:]
+        var nextPowerTrendWatts: [Int32: Double] = [:]
         let processNetworkTotals = self.processNetworkTotals
         var newNetworkCache: [Int32: UInt64] = [:]
 
@@ -1190,6 +1201,27 @@ final class SystemMonitor: ObservableObject {
             let diskPerSecond = UInt64(Double(diskDelta) / interval)
             newRUsageCache[pid] = currentDisk
 
+            let energyNanojoules = info.energyNanojoules
+            let previousEnergy = previousProcessEnergyNanojoules[pid] ?? energyNanojoules
+            let energyDelta = energyNanojoules >= previousEnergy ? energyNanojoules - previousEnergy : 0
+            let powerUsageWatts = Double(energyDelta) / 1_000_000_000.0 / interval
+            newEnergyCache[pid] = energyNanojoules
+
+            let packageWakeups = info.packageIdleWakeups
+            let previousPackageWakeups = previousProcessPackageIdleWakeups[pid] ?? packageWakeups
+            let packageWakeupDelta = packageWakeups >= previousPackageWakeups ? packageWakeups - previousPackageWakeups : 0
+            newPackageWakeupCache[pid] = packageWakeups
+
+            let interruptWakeups = info.interruptWakeups
+            let previousInterruptWakeups = previousProcessInterruptWakeups[pid] ?? interruptWakeups
+            let interruptWakeupDelta = interruptWakeups >= previousInterruptWakeups ? interruptWakeups - previousInterruptWakeups : 0
+            newInterruptWakeupCache[pid] = interruptWakeups
+
+            let totalWakeupsPerSecond = Double(packageWakeupDelta + interruptWakeupDelta) / interval
+            let previousTrend = processPowerTrendWatts[pid] ?? powerUsageWatts
+            let powerTrendWatts = previousTrend * 0.74 + powerUsageWatts * 0.26
+            nextPowerTrendWatts[pid] = powerTrendWatts
+
             let totalNetworkBytes = processNetworkTotals[pid] ?? 0
             let previousNetworkBytes = previousProcessNetworkTotals[pid] ?? totalNetworkBytes
             let networkDelta = totalNetworkBytes >= previousNetworkBytes ? (totalNetworkBytes - previousNetworkBytes) : UInt64(0)
@@ -1210,8 +1242,10 @@ final class SystemMonitor: ObservableObject {
                 diskBytesPerSecond: diskPerSecond,
                 networkBytesPerSecond: networkPerSecond,
                 networkText: networkPerSecond == 0 ? "0 Mbps" : DisplayFormat.networkRate(networkPerSecond),
-                powerImpact: DisplayFormat.impactLabel(cpuPercent: cpuPercent),
-                trend: DisplayFormat.impactLabel(cpuPercent: cpuPercent * 0.7),
+                powerUsageWatts: powerUsageWatts,
+                powerTrendWatts: powerTrendWatts,
+                powerImpact: DisplayFormat.impactLabel(powerUsageWatts: powerUsageWatts, wakeupsPerSecond: totalWakeupsPerSecond, language: language),
+                trend: DisplayFormat.impactLabel(powerUsageWatts: powerTrendWatts, wakeupsPerSecond: totalWakeupsPerSecond * 0.7, language: language),
                 threadCount: info.threadCount,
                 openFiles: info.openFiles
             )
@@ -1220,6 +1254,10 @@ final class SystemMonitor: ObservableObject {
 
         previousProcessCPUTime = newCPUCache
         previousProcessRUsage = newRUsageCache
+        previousProcessEnergyNanojoules = newEnergyCache
+        previousProcessPackageIdleWakeups = newPackageWakeupCache
+        previousProcessInterruptWakeups = newInterruptWakeupCache
+        processPowerTrendWatts = nextPowerTrendWatts
         previousProcessNetworkTotals = newNetworkCache
 
         let visibleApps = frontWindowApplications()
@@ -1241,6 +1279,8 @@ final class SystemMonitor: ObservableObject {
                     diskBytesPerSecond: row.diskBytesPerSecond,
                     networkBytesPerSecond: row.networkBytesPerSecond,
                     networkText: row.networkText,
+                    powerUsageWatts: row.powerUsageWatts,
+                    powerTrendWatts: row.powerTrendWatts,
                     powerImpact: row.powerImpact,
                     trend: row.trend,
                     threadCount: row.threadCount,
@@ -1262,8 +1302,10 @@ final class SystemMonitor: ObservableObject {
                 diskBytesPerSecond: 0,
                 networkBytesPerSecond: 0,
                 networkText: "0 Mbps",
-                powerImpact: DisplayFormat.impactLabel(cpuPercent: 0, language: language),
-                trend: DisplayFormat.impactLabel(cpuPercent: 0, language: language),
+                powerUsageWatts: 0,
+                powerTrendWatts: 0,
+                powerImpact: DisplayFormat.impactLabel(powerUsageWatts: 0, wakeupsPerSecond: 0, language: language),
+                trend: DisplayFormat.impactLabel(powerUsageWatts: 0, wakeupsPerSecond: 0, language: language),
                 threadCount: 0,
                 openFiles: 0
             )
@@ -1290,16 +1332,33 @@ final class SystemMonitor: ObservableObject {
             cpuPercent = 0.1
         }
 
+        let sampleInterval = max(refreshSpeed.interval ?? 1.0, 0.5)
+
         let currentDisk: (read: UInt64, write: UInt64) = (info.diskReadBytes, info.diskWriteBytes)
         let previousDisk = previousProcessRUsage[pid] ?? currentDisk
         let diskDelta = (currentDisk.read >= previousDisk.read ? currentDisk.read - previousDisk.read : 0) + (currentDisk.write >= previousDisk.write ? currentDisk.write - previousDisk.write : 0)
-        let diskPerSecond = UInt64(Double(diskDelta) / max(refreshSpeed.interval ?? 1.0, 0.5))
+        let diskPerSecond = UInt64(Double(diskDelta) / sampleInterval)
+
+        let energyNanojoules = info.energyNanojoules
+        let previousEnergy = previousProcessEnergyNanojoules[pid] ?? energyNanojoules
+        let energyDelta = energyNanojoules >= previousEnergy ? energyNanojoules - previousEnergy : 0
+        let powerUsageWatts = Double(energyDelta) / 1_000_000_000.0 / sampleInterval
+
+        let packageWakeups = info.packageIdleWakeups
+        let previousPackageWakeups = previousProcessPackageIdleWakeups[pid] ?? packageWakeups
+        let packageWakeupDelta = packageWakeups >= previousPackageWakeups ? packageWakeups - previousPackageWakeups : 0
+
+        let interruptWakeups = info.interruptWakeups
+        let previousInterruptWakeups = previousProcessInterruptWakeups[pid] ?? interruptWakeups
+        let interruptWakeupDelta = interruptWakeups >= previousInterruptWakeups ? interruptWakeups - previousInterruptWakeups : 0
+        let totalWakeupsPerSecond = Double(packageWakeupDelta + interruptWakeupDelta) / sampleInterval
+        let powerTrendWatts = processPowerTrendWatts[pid] ?? powerUsageWatts
 
         let networkTotals = processNetworkTotals
         let totalNetworkBytes = networkTotals[pid] ?? 0
         let previousNetworkBytes = previousProcessNetworkTotals[pid] ?? totalNetworkBytes
         let networkDelta = totalNetworkBytes >= previousNetworkBytes ? (totalNetworkBytes - previousNetworkBytes) : UInt64(0)
-        let networkPerSecond = UInt64(Double(networkDelta) / max(refreshSpeed.interval ?? 1.0, 0.5))
+        let networkPerSecond = UInt64(Double(networkDelta) / sampleInterval)
 
         return ProcessRowData(
             pid: pid,
@@ -1315,8 +1374,10 @@ final class SystemMonitor: ObservableObject {
             diskBytesPerSecond: diskPerSecond,
             networkBytesPerSecond: networkPerSecond,
             networkText: networkPerSecond == 0 ? "0 Mbps" : DisplayFormat.networkRate(networkPerSecond),
-            powerImpact: DisplayFormat.impactLabel(cpuPercent: cpuPercent),
-            trend: DisplayFormat.impactLabel(cpuPercent: cpuPercent * 0.7),
+            powerUsageWatts: powerUsageWatts,
+            powerTrendWatts: powerTrendWatts,
+            powerImpact: DisplayFormat.impactLabel(powerUsageWatts: powerUsageWatts, wakeupsPerSecond: totalWakeupsPerSecond, language: language),
+            trend: DisplayFormat.impactLabel(powerUsageWatts: powerTrendWatts, wakeupsPerSecond: totalWakeupsPerSecond * 0.7, language: language),
             threadCount: info.threadCount,
             openFiles: info.openFiles
         )
@@ -1371,6 +1432,8 @@ final class SystemMonitor: ObservableObject {
                 diskBytesPerSecond: row.diskBytesPerSecond,
                 networkBytesPerSecond: row.networkBytesPerSecond,
                 networkText: row.networkText,
+                powerUsageWatts: row.powerUsageWatts,
+                powerTrendWatts: row.powerTrendWatts,
                 powerImpact: row.powerImpact,
                 trend: row.trend,
                 threadCount: row.threadCount,
@@ -1535,7 +1598,7 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func refreshDisks(interval: TimeInterval) {
-        let previousStates = Dictionary(uniqueKeysWithValues: disks.map { ($0.id, $0) })
+        let previousStates = Dictionary(disks.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         let meta = diskMetadata()
         var updated: [DiskState] = []
         var nextCounters: [String: (read: UInt64, write: UInt64, readOps: UInt64, writeOps: UInt64, readTimeNs: UInt64, writeTimeNs: UInt64)] = [:]
@@ -1648,10 +1711,10 @@ final class SystemMonitor: ObservableObject {
         ]
         if cpu.performanceCoreSpeedText != "--" || cpu.efficiencyCoreSpeedText != "--" {
             if cpu.performanceCoreSpeedText != "--" {
-                rightPairs.insert(.init(label: language.text("性能核基准速度", "P-core base speed"), value: cpu.performanceCoreSpeedText), at: 0)
+                rightPairs.insert(.init(label: primaryCoreSpeedLabel(), value: cpu.performanceCoreSpeedText), at: 0)
             }
             if cpu.efficiencyCoreSpeedText != "--" {
-                rightPairs.insert(.init(label: language.text("能效核基准速度", "E-core base speed"), value: cpu.efficiencyCoreSpeedText), at: min(1, rightPairs.count))
+                rightPairs.insert(.init(label: secondaryCoreSpeedLabel(), value: cpu.efficiencyCoreSpeedText), at: min(1, rightPairs.count))
             }
         } else if cpu.baseSpeedText != "--" {
             rightPairs.insert(.init(label: language.text("基准速度", "Base speed"), value: cpu.baseSpeedText), at: 0)
@@ -1692,6 +1755,62 @@ final class SystemMonitor: ObservableObject {
             rightPairs: rightPairs,
             memoryComposition: false
         )
+    }
+
+    private func primaryCoreSpeedLabel() -> String {
+        switch cpu.coreTierMode {
+        case .superPerformance:
+            return language.text("超级核基准速度", "S-core base speed")
+        case .superEfficiency:
+            return language.text("超级核基准速度", "S-core base speed")
+        case .genericPrimarySecondary:
+            return language.text("主核心基准速度", "Primary-core base speed")
+        case .performanceEfficiency, .singlePerformanceTier:
+            return language.text("性能核基准速度", "P-core base speed")
+        }
+    }
+
+    private func secondaryCoreSpeedLabel() -> String {
+        switch cpu.coreTierMode {
+        case .superPerformance:
+            return language.text("性能核基准速度", "Performance-core base speed")
+        case .performanceEfficiency:
+            return language.text("能效核基准速度", "E-core base speed")
+        case .superEfficiency:
+            return language.text("能效核基准速度", "E-core base speed")
+        case .genericPrimarySecondary:
+            return language.text("次核心基准速度", "Secondary-core base speed")
+        case .singlePerformanceTier:
+            return language.text("单层性能核基准速度", "Performance-core base speed")
+        }
+    }
+
+    private func primaryCoreTemperatureLabel() -> String {
+        switch cpu.coreTierMode {
+        case .superPerformance:
+            return language.text("超级核温度", "S-core temperature")
+        case .superEfficiency:
+            return language.text("超级核温度", "S-core temperature")
+        case .genericPrimarySecondary:
+            return language.text("主核心温度", "Primary-core temperature")
+        case .performanceEfficiency, .singlePerformanceTier:
+            return language.text("P 核温度", "P-core temperature")
+        }
+    }
+
+    private func secondaryCoreTemperatureLabel() -> String {
+        switch cpu.coreTierMode {
+        case .superPerformance:
+            return language.text("性能核温度", "Performance-core temperature")
+        case .performanceEfficiency:
+            return language.text("E 核温度", "E-core temperature")
+        case .superEfficiency:
+            return language.text("E 核温度", "E-core temperature")
+        case .genericPrimarySecondary:
+            return language.text("次核心温度", "Secondary-core temperature")
+        case .singlePerformanceTier:
+            return language.text("单层性能核温度", "Performance-core temperature")
+        }
     }
 
     private func virtualizationStatusText() -> String {
@@ -1790,7 +1909,9 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func networkDetail(_ network: NetworkState) -> PerformanceDetailViewData {
-        let connectionType = language.isChinese && network.subtitle == "Wi-Fi" ? "WLAN" : network.subtitle
+        let connectionType = language.isChinese && network.subtitle == "Wi-Fi"
+            ? "WLAN"
+            : language.localizeNetworkMedium(network.subtitle)
         return PerformanceDetailViewData(
             title: network.displayName,
             topRight: network.interfaceName,
@@ -1821,7 +1942,7 @@ final class SystemMonitor: ObservableObject {
         if rawKind == "SSD" || rawKind == "HDD" {
             return rawKind
         }
-        return language.isChinese ? rawKind : language.translateDiskKind(rawKind)
+        return language.localizeDiskKind(rawKind)
     }
 
     private func npuDetail(_ npu: NPUState) -> PerformanceDetailViewData {
@@ -1865,13 +1986,13 @@ final class SystemMonitor: ObservableObject {
             ? thermalTemperatureText(thermal.networkTemperatureChartCeilingCelsius)
             : "\(Int(max(thermal.fanChartCeilingRPM, 1))) RPM"
         let topRight = fanless
-            ? thermalTemperatureText(thermal.networkTemperatureCelsius)
-            : "\(thermal.currentFanRPM) RPM"
+            ? "Airport Wireless"
+            : language.text("风扇#1", "Fan #1")
         let primaryLabel = fanless
             ? language.text("网卡温度", "Network temperature")
             : language.text("风扇转速", "Fan speed")
         return PerformanceDetailViewData(
-            title: language.text("散热", "Thermal"),
+            title: language.text("散热", "Cooling"),
             topRight: topRight,
             ceilingLabel: ceilingLabel,
             chartCeiling: chartCeiling,
@@ -1884,8 +2005,8 @@ final class SystemMonitor: ObservableObject {
             lowerLabel: nil,
             leftMetrics: [
                 .init(label: language.text("CPU 温度", "CPU temperature"), value: thermalTemperatureText(thermal.cpuTemperatureCelsius), prominent: true),
-                .init(label: language.text("E 核温度", "E-core temperature"), value: thermalTemperatureText(thermal.efficiencyCoreTemperatureCelsius), prominent: true),
-                .init(label: language.text("P 核温度", "P-core temperature"), value: thermalTemperatureText(thermal.performanceCoreTemperatureCelsius), prominent: true),
+                .init(label: secondaryCoreTemperatureLabel(), value: thermalTemperatureText(thermal.efficiencyCoreTemperatureCelsius), prominent: true),
+                .init(label: primaryCoreTemperatureLabel(), value: thermalTemperatureText(thermal.performanceCoreTemperatureCelsius), prominent: true),
                 .init(label: language.text("GPU 温度", "GPU temperature"), value: thermalTemperatureText(thermal.gpuTemperatureCelsius), prominent: true),
                 .init(label: language.text("磁盘温度", "Disk temperature"), value: thermalTemperatureText(thermal.diskTemperatureCelsius), prominent: true),
                 .init(label: language.text("网卡温度", "Network temperature"), value: thermalTemperatureText(thermal.networkTemperatureCelsius), prominent: true),
@@ -1985,6 +2106,9 @@ extension SystemMonitor {
         let totalCPUTime: UInt64
         let diskReadBytes: UInt64
         let diskWriteBytes: UInt64
+        let energyNanojoules: UInt64
+        let packageIdleWakeups: UInt64
+        let interruptWakeups: UInt64
         let threadCount: Int
         let openFiles: Int
         let isApplication: Bool
@@ -2138,7 +2262,7 @@ extension SystemMonitor {
                 let labelDisabled = disabledLaunchdByGroup[group]?.contains(label) ?? false
                 let plistDisabled = (plist["Disabled"] as? Bool) ?? false
                 let enabled = !(plistDisabled || labelDisabled)
-                let impact = directory.contains("Daemons") ? "高" : "未计算"
+                let impact = directory.contains("Daemons") ? "High" : "N/A"
 
                 items.append(
                     StartupItemRowData(
@@ -2146,7 +2270,7 @@ extension SystemMonitor {
                         name: name,
                         icon: startupItemIcon(fromProgramPath: program),
                         publisher: publisher,
-                        status: enabled ? "已启用" : "已禁用",
+                        status: enabled ? "Enabled" : "Disabled",
                         startupImpact: impact
                     )
                 )
@@ -2164,9 +2288,7 @@ extension SystemMonitor {
     }
 
     func directoryLabel(_ path: String) -> String {
-        if path.contains("LaunchDaemons") { return "系统守护进程" }
-        if path.contains("/Library/LaunchAgents") { return "系统代理" }
-        return "用户代理"
+        MonitorProbe.directoryLabel(path)
     }
 
     func startupItemIcon(fromProgramPath program: String) -> NSImage? {
@@ -2360,19 +2482,7 @@ extension SystemMonitor {
     }
 
     func serviceStatusText(pid: Int32?, stateToken: String, disabled: Bool) -> String {
-        if disabled {
-            return "已禁用"
-        }
-        if pid != nil {
-            return "正在运行"
-        }
-        if stateToken == "0" {
-            return "已停止"
-        }
-        if stateToken == "-" || stateToken.hasPrefix("(") {
-            return "按需"
-        }
-        return "已加载"
+        MonitorProbe.serviceStatusText(pid: pid, stateToken: stateToken, disabled: disabled)
     }
 
     func aneDeviceInfo() -> ANEDeviceInfo? {
@@ -2624,6 +2734,17 @@ extension SystemMonitor {
         return language.text("凉爽", "Very cool")
     }
 
+    func thermalStatusEnglish(from value: String) -> String {
+        switch value {
+        case "非常热": return "Very hot"
+        case "热": return "Hot"
+        case "正常": return "Normal"
+        case "凉": return "Cool"
+        case "凉爽": return "Very cool"
+        default: return value
+        }
+    }
+
     func extractFirstMatch(in text: String, pattern: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(text.startIndex..., in: text)
@@ -2642,7 +2763,7 @@ extension SystemMonitor {
                 }
                 return app.activationPolicy == .regular
             }
-        let appByPID = Dictionary(uniqueKeysWithValues: runningApps.map { ($0.processIdentifier, $0) })
+        let appByPID = Dictionary(runningApps.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { _, latest in latest })
 
         var orderedPIDs: [Int32] = []
         if let windowInfo = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
@@ -2749,6 +2870,9 @@ extension SystemMonitor {
             totalCPUTime: taskInfo.pti_total_user + taskInfo.pti_total_system,
             diskReadBytes: usageResult == 0 ? usage.ri_diskio_bytesread : 0,
             diskWriteBytes: usageResult == 0 ? usage.ri_diskio_byteswritten : 0,
+            energyNanojoules: usageResult == 0 ? usage.ri_energy_nj : 0,
+            packageIdleWakeups: usageResult == 0 ? usage.ri_pkg_idle_wkups : 0,
+            interruptWakeups: usageResult == 0 ? usage.ri_interrupt_wkups : 0,
             threadCount: Int(taskInfo.pti_threadnum),
             openFiles: Int(bsdInfo.pbi_nfiles),
             isApplication: app,
@@ -2772,12 +2896,12 @@ extension SystemMonitor {
 
     func processStatusText(_ status: UInt32) -> String {
         switch status {
-        case UInt32(SIDL): return "正在创建"
-        case UInt32(SRUN): return "正在运行"
-        case UInt32(SSLEEP): return "正在睡眠"
-        case UInt32(SSTOP): return "已停止"
-        case UInt32(SZOMB): return "僵尸"
-        default: return "未知"
+        case UInt32(SIDL): return "Starting"
+        case UInt32(SRUN): return "Running"
+        case UInt32(SSLEEP): return "Sleeping"
+        case UInt32(SSTOP): return "Stopped"
+        case UInt32(SZOMB): return "Zombie"
+        default: return "Unknown"
         }
     }
 
@@ -2797,7 +2921,7 @@ extension SystemMonitor {
             }
             return "x86_64"
         case .intelLike, .unknown:
-            return is64Bit ? "64位" : "32位"
+            return is64Bit ? "64-bit" : "32-bit"
         }
     }
 
@@ -2873,16 +2997,16 @@ extension SystemMonitor {
                 medium = "Wi-Fi"
                 groupKey = "wifi"
             } else if hardwarePort.localizedCaseInsensitiveContains("Ethernet") || hardwarePort.localizedCaseInsensitiveContains("LAN") {
-                displayName = "以太网"
+                displayName = "Ethernet"
                 medium = hardwarePort
                 groupKey = "ethernet"
             } else if name.hasPrefix("utun") {
                 displayName = name
-                medium = "VPN隧道"
+                medium = "VPN tunnel"
                 groupKey = name
             } else if name.hasPrefix("bridge") || name.hasPrefix("vmenet") {
                 displayName = name
-                medium = "虚拟网络"
+                medium = "Virtual network"
                 groupKey = name
             } else if name.hasPrefix("awdl") || name.hasPrefix("llw") {
                 displayName = name
@@ -2890,7 +3014,7 @@ extension SystemMonitor {
                 groupKey = name
             } else {
                 displayName = name
-                medium = hardwarePort.isEmpty ? "网络接口" : hardwarePort
+                medium = hardwarePort.isEmpty ? "Network interface" : hardwarePort
                 groupKey = name
             }
             return InterfaceSnapshot(
@@ -3110,13 +3234,13 @@ extension SystemMonitor {
             let size = (mediaProps["Size"] as? NSNumber)?.uint64Value ?? 0
             let removable = (mediaProps["Removable"] as? Bool) ?? false || ((mediaProps["Ejectable"] as? Bool) ?? false)
             let model = ioRegistryName(media).isEmpty ? deviceIdentifier : ioRegistryName(media)
-            let kind = removable ? "可移动" : (model.localizedCaseInsensitiveContains("SSD") ? "SSD" : "HDD")
+            let kind = removable ? "Removable" : (model.localizedCaseInsensitiveContains("SSD") ? "SSD" : "HDD")
             let label = mountInfo[deviceIdentifier]?.label ?? deviceIdentifier
             let available = mountInfo[deviceIdentifier]?.availableBytes ?? size
 
             result.append(DiskMeta(
                 id: deviceIdentifier,
-                title: language.text("磁盘", "Disk") + " \(index) (\(deviceIdentifier))",
+                title: "Disk \(index) (\(deviceIdentifier))",
                 subtitle: label,
                 kind: kind,
                 model: model,
@@ -3339,34 +3463,145 @@ extension SystemMonitor {
             return .intelLike
         }
 
-        let machine = NXGetLocalArchInfo()?.pointee.name.flatMap { String(cString: $0) } ?? ""
-        if machine.contains("arm64") {
+        if let arm64 = sysctlInt("hw.optional.arm64"), arm64 == 1 {
             return .appleSilicon
         }
-        if machine.contains("x86") || machine.contains("i386") {
-            return .intelLike
+
+        if let cpuType = sysctlInt("hw.cputype") {
+            let x86_64CPUType = UInt64(UInt32(bitPattern: cpu_type_t(CPU_TYPE_X86_64)))
+            let x86CPUType = UInt64(UInt32(bitPattern: cpu_type_t(CPU_TYPE_X86)))
+            if cpuType == x86_64CPUType || cpuType == x86CPUType {
+                return .intelLike
+            }
         }
 
-        if let brand = sysctlString("machdep.cpu.brand_string"), brand.contains("Apple") || brand.contains("M1") || brand.contains("M2") || brand.contains("M3") || brand.contains("M4") {
+        if let machine = sysctlString("hw.machine")?.lowercased() {
+            if machine.contains("arm64") {
+                return .appleSilicon
+            }
+            if machine.contains("x86") || machine.contains("i386") {
+                return .intelLike
+            }
+        }
+
+        if let processArch = ProcessInfo.processInfo.processorCount as Int?, processArch > 0,
+           let translated = sysctlInt("sysctl.proc_translated"), translated == 0,
+           let brand = sysctlString("machdep.cpu.brand_string"),
+           !brand.isEmpty {
+            if brand.contains("Intel") || brand.contains("Xeon") {
+                return .intelLike
+            }
+        }
+
+        if let brand = sysctlString("machdep.cpu.brand_string"), brand.contains("Apple") || brand.contains("M1") || brand.contains("M2") || brand.contains("M3") || brand.contains("M4") || brand.contains("M5") {
             return .appleSilicon
         }
 
         return .unknown
     }
 
-    func detectCPUFrequencyInfo() -> (base: String, performance: String, efficiency: String) {
+    func detectCPUFrequencyInfo() -> (base: String, primary: String, secondary: String, mode: AppleSiliconCoreTierMode) {
         switch cpuArchitecture {
         case .appleSilicon:
-            let performance = detectAppleSiliconFrequencyText(propertyName: "voltage-states5-sram") ?? "--"
-            let efficiency = detectAppleSiliconFrequencyText(propertyName: "voltage-states1-sram") ?? "--"
-            return (performance != "--" ? performance : efficiency, performance, efficiency)
+            let candidates = collectAppleSiliconFrequencyCandidates()
+            let candidateByName = Dictionary(uniqueKeysWithValues: candidates.map { ($0.propertyName, $0.displayText) })
+            let primaryClassic = candidateByName["voltage-states5-sram"] ?? "--"
+            let efficiencyClassic = candidateByName["voltage-states1-sram"] ?? "--"
+            let performanceModern = candidateByName["voltage-states22-sram"]
+                ?? candidateByName["voltage-states23-sram"]
+                ?? candidateByName["voltage-states24-sram"]
+                ?? "--"
+
+            let mode: AppleSiliconCoreTierMode
+            let primary: String
+            let secondary: String
+            switch candidates.count {
+            case 0:
+                mode = .singlePerformanceTier
+                primary = "--"
+                secondary = "--"
+            case 1:
+                mode = .singlePerformanceTier
+                primary = primaryClassic != "--" ? primaryClassic : (candidates.first?.displayText ?? "--")
+                secondary = "--"
+            default:
+                if primaryClassic != "--" && efficiencyClassic != "--" && performanceModern != "--" {
+                    mode = .superEfficiency
+                    primary = primaryClassic
+                    secondary = efficiencyClassic
+                } else if primaryClassic != "--" && efficiencyClassic != "--" {
+                    mode = .performanceEfficiency
+                    primary = primaryClassic
+                    secondary = efficiencyClassic
+                } else if primaryClassic != "--" && performanceModern != "--" {
+                    mode = .superPerformance
+                    primary = primaryClassic
+                    secondary = performanceModern
+                } else {
+                    mode = .genericPrimarySecondary
+                    primary = candidates.first?.displayText ?? "--"
+                    secondary = candidates.dropFirst().first?.displayText ?? "--"
+                }
+            }
+
+            let base = primary != "--" ? primary : secondary
+            return (base, primary, secondary, mode)
         case .intelLike, .unknown:
             let base = DisplayFormat.frequency(sysctlInt("hw.cpufrequency"))
-            return (base, "--", "--")
+            return (base, "--", "--", .singlePerformanceTier)
+        }
+    }
+
+    private struct FrequencyCandidate {
+        let propertyName: String
+        let hertz: UInt32
+        let displayText: String
+    }
+
+    private func collectAppleSiliconFrequencyCandidates() -> [FrequencyCandidate] {
+        let candidateKeys = [
+            "voltage-states5-sram",
+            "voltage-states1-sram",
+            "voltage-states22-sram",
+            "voltage-states23-sram",
+            "voltage-states24-sram"
+        ]
+
+        return candidateKeys.compactMap { propertyName in
+            guard let hertz = detectAppleSiliconFrequencyValue(propertyName: propertyName), hertz > 0 else {
+                return nil
+            }
+            let mhz: Double = hertz > 100_000_000 ? Double(hertz) / 1_000_000 : Double(hertz) / 1_000
+            return FrequencyCandidate(
+                propertyName: propertyName,
+                hertz: hertz,
+                displayText: String(format: "%.2f GHz", mhz / 1000.0)
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.hertz != rhs.hertz {
+                return lhs.hertz > rhs.hertz
+            }
+            return lhs.propertyName < rhs.propertyName
         }
     }
 
     func detectAppleSiliconFrequencyText(propertyName: String) -> String? {
+        guard let maxFrequency = detectAppleSiliconFrequencyValue(propertyName: propertyName), maxFrequency > 0 else {
+            return nil
+        }
+
+        let mhz: Double
+        if maxFrequency > 100_000_000 {
+            mhz = Double(maxFrequency) / 1_000_000
+        } else {
+            mhz = Double(maxFrequency) / 1_000
+        }
+
+        return String(format: "%.2f GHz", mhz / 1000.0)
+    }
+
+    func detectAppleSiliconFrequencyValue(propertyName: String) -> UInt32? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching("pmgr"))
         guard service != 0 else {
             return nil
@@ -3399,16 +3634,7 @@ extension SystemMonitor {
             index += 2
         }
 
-        guard maxFrequency > 0 else { return nil }
-
-        let mhz: Double
-        if maxFrequency > 100_000_000 {
-            mhz = Double(maxFrequency) / 1_000_000
-        } else {
-            mhz = Double(maxFrequency) / 1_000
-        }
-
-        return String(format: "%.2f GHz", mhz / 1000.0)
+        return maxFrequency > 0 ? maxFrequency : nil
     }
 
     func loadCachePresentation() {
@@ -3512,7 +3738,7 @@ private enum MonitorProbe {
         if let interfaceFilter {
             arguments.append(contentsOf: ["-t", interfaceFilter])
         }
-        guard let data = try? Process.runAndCapture("/usr/sbin/nettop", arguments),
+        guard let data = try? Process.runAndCapture("/usr/bin/nettop", arguments),
               let text = String(data: data, encoding: .utf8)
         else {
             return [:]
@@ -3520,23 +3746,34 @@ private enum MonitorProbe {
 
         var result: [Int32: UInt64] = [:]
         let apps = NSWorkspace.shared.runningApplications
-        let pidByName = Dictionary(uniqueKeysWithValues: apps.compactMap { app -> (String, Int32)? in
-            guard let name = app.localizedName else { return nil }
-            return (name, app.processIdentifier)
-        })
+        let pidsByName = apps.reduce(into: [String: [Int32]]()) { result, app in
+            guard let name = app.localizedName, !name.isEmpty else { return }
+            result[name, default: []].append(app.processIdentifier)
+        }
 
-        for line in text.components(separatedBy: .newlines).dropFirst() {
-            let parts = line.split(whereSeparator: \.isWhitespace)
-            guard parts.count >= 6 else { continue }
-            let processToken = String(parts[1])
-            let bytesIn = UInt64(parts[4]) ?? 0
-            let bytesOut = UInt64(parts[5]) ?? 0
+        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        guard let header = lines.first else { return result }
+        let columns = header.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        guard
+            let bytesInIndex = columns.firstIndex(of: "bytes_in"),
+            let bytesOutIndex = columns.firstIndex(of: "bytes_out")
+        else {
+            return result
+        }
+
+        for line in lines.dropFirst() {
+            let parts = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count > max(bytesInIndex, bytesOutIndex) else { continue }
+
+            let processToken = parts[1]
+            let bytesIn = UInt64(parts[bytesInIndex]) ?? 0
+            let bytesOut = UInt64(parts[bytesOutIndex]) ?? 0
             let total = bytesIn + bytesOut
 
             if let dotIndex = processToken.lastIndex(of: "."),
                let pid = Int32(processToken[processToken.index(after: dotIndex)...]) {
                 result[pid] = total
-            } else if let pid = pidByName[processToken] {
+            } else if let pids = pidsByName[processToken], pids.count == 1, let pid = pids.first {
                 result[pid] = total
             }
         }
@@ -3645,10 +3882,13 @@ private enum MonitorProbe {
         }
 
         let devices = MTLCopyAllDevices()
-        let acceleratorByRegistryID = Dictionary(uniqueKeysWithValues: acceleratorArray.compactMap { entry -> (UInt64, [String: Any])? in
-            guard let registryID = (entry["IORegistryEntryID"] as? NSNumber)?.uint64Value else { return nil }
-            return (registryID, entry)
-        })
+        let acceleratorByRegistryID = Dictionary(
+            acceleratorArray.compactMap { entry -> (UInt64, [String: Any])? in
+                guard let registryID = (entry["IORegistryEntryID"] as? NSNumber)?.uint64Value else { return nil }
+                return (registryID, entry)
+            },
+            uniquingKeysWith: { current, _ in current }
+        )
 
         var next: [GPUState] = []
         let gpuCount = max(profilerItems.count, devices.count)
@@ -3674,7 +3914,12 @@ private enum MonitorProbe {
             let rendererUtil = (performance?["Renderer Utilization %"] as? NSNumber)?.doubleValue ?? 0
             let tilerUtil = (performance?["Tiler Utilization %"] as? NSNumber)?.doubleValue ?? 0
             let inUseMemory = (performance?["In use system memory"] as? NSNumber)?.uint64Value ?? 0
-            let allocatedMemory = (performance?["Alloc system memory"] as? NSNumber)?.uint64Value ?? 0
+            let performanceAllocatedMemory = (performance?["Alloc system memory"] as? NSNumber)?.uint64Value ?? 0
+            let recommendedWorkingSet = device.recommendedMaxWorkingSetSize
+            let allocatedMemory = max(
+                inUseMemory,
+                recommendedWorkingSet > 0 ? recommendedWorkingSet : performanceAllocatedMemory
+            )
             let openGLVersion: String? = nil
 
             let id = "gpu\(index)"
@@ -3734,9 +3979,9 @@ private enum MonitorProbe {
                     id: "login-\($0)",
                     name: $0,
                     iconProgramPath: nil,
-                    publisher: "登录项",
-                    status: "已启用",
-                    startupImpact: "未计算"
+                    publisher: "Login item",
+                    status: "Enabled",
+                    startupImpact: "N/A"
                 )
             })
         }
@@ -3762,14 +4007,14 @@ private enum MonitorProbe {
                 let labelDisabled = disabledLaunchdByGroup[group]?.contains(label) ?? false
                 let plistDisabled = (plist["Disabled"] as? Bool) ?? false
                 let enabled = !(plistDisabled || labelDisabled)
-                let impact = directory.contains("Daemons") ? "高" : "未计算"
+                let impact = directory.contains("Daemons") ? "High" : "N/A"
 
                 let row = StartupRowSnapshot(
                     id: path,
                     name: name,
                     iconProgramPath: program.isEmpty ? nil : program,
                     publisher: publisher,
-                    status: enabled ? "已启用" : "已禁用",
+                    status: enabled ? "Enabled" : "Disabled",
                     startupImpact: impact
                 )
                 if rows.contains(where: { $0.id == row.id || $0.name == row.name }) { continue }
@@ -3811,7 +4056,7 @@ private enum MonitorProbe {
                 iconProgramPath: metadata.program,
                 pid: nil,
                 serviceDescription: metadata.serviceDescription,
-                status: metadata.disabled ? "已禁用" : "未加载",
+                status: metadata.disabled ? "Disabled" : "Not loaded",
                 group: metadata.group,
                 label: metadata.label
             )
@@ -4043,9 +4288,9 @@ private enum MonitorProbe {
     }
 
     static func directoryLabel(_ path: String) -> String {
-        if path.contains("LaunchDaemons") { return "系统守护进程" }
-        if path.contains("/Library/LaunchAgents") { return "系统代理" }
-        return "用户代理"
+        if path.contains("LaunchDaemons") { return "System daemon" }
+        if path.contains("/Library/LaunchAgents") { return "System agent" }
+        return "User agent"
     }
 
     static func serviceCompositeKey(label: String, group: String) -> String {
@@ -4107,18 +4352,18 @@ private enum MonitorProbe {
 
     static func serviceStatusText(pid: Int32?, stateToken: String, disabled: Bool) -> String {
         if disabled {
-            return "已禁用"
+            return "Disabled"
         }
         if pid != nil {
-            return "正在运行"
+            return "Running"
         }
         if stateToken == "0" {
-            return "已停止"
+            return "Stopped"
         }
         if stateToken == "-" || stateToken.hasPrefix("(") {
-            return "按需"
+            return "On demand"
         }
-        return "已加载"
+        return "Loaded"
     }
 
     static func currentNeuralUsageTotals() -> SystemMonitor.NeuralUsageTotals {

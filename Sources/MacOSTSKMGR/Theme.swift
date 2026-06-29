@@ -13,17 +13,17 @@ enum AppTheme {
     static func windowTop(_ scheme: ColorScheme) -> Color {
         scheme == .dark
             ? Color(red: 0.12, green: 0.14, blue: 0.18).opacity(0.94)
-            : Color.white.opacity(0.88)
+            : Color(red: 0.82, green: 0.84, blue: 0.88).opacity(0.98)
     }
 
     static func windowBottom(_ scheme: ColorScheme) -> Color {
         scheme == .dark
             ? Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.92)
-            : Color(red: 0.94, green: 0.97, blue: 1.0).opacity(0.72)
+            : Color(red: 0.76, green: 0.79, blue: 0.84).opacity(0.97)
     }
 
     static func topGlow(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.42)
+        scheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.05)
     }
 
     static func chromeBackground(_ scheme: ColorScheme) -> Color {
