@@ -14,15 +14,17 @@ concurrency:
 jobs:
   build-app:
     name: Build app
-    runs-on: macos-latest
+    # Pinned to macos-26 (not macos-latest): the app's deployment target is
+    # macOS 26.0, so it can only be built on a runner that ships the macOS 26
+    # SDK. macos-latest is currently mid-migration and non-deterministically
+    # lands on either macOS 15 (SDK 15.5, build fails) or macOS 26.
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v5
       - name: Show toolchain
         run: |
           xcodebuild -version
           swift --version
-
       - name: Build (Release, unsigned)
         run: |
           xcodebuild \
@@ -36,10 +38,9 @@ jobs:
 
   unit-tests:
     name: Metrics unit tests
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v5
       - name: Run MetricsKit tests
         working-directory: MetricsKit
         run: swift test --parallel
