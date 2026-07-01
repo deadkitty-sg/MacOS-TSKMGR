@@ -21,18 +21,30 @@ private func IOServiceOpen_(_ service: io_service_t, _ owningTask: UInt32, _ typ
 private func IOServiceClose_(_ connect: UInt32) -> kern_return_t
 @_silgen_name("IOConnectCallStructMethod")
 private func IOConnectCallStructMethod_(_ conn: UInt32, _ selector: UInt32, _ input: UnsafeRawPointer, _ inputSize: Int, _ output: UnsafeMutableRawPointer, _ outputSize: UnsafeMutablePointer<Int>) -> kern_return_t
-@_silgen_name("IOHIDEventSystemClientCreate")
-private func IOHIDEventSystemClientCreate(_ allocator: CFAllocator?) -> UnsafeMutableRawPointer?
-@_silgen_name("IOHIDEventSystemClientSetMatching")
-private func IOHIDEventSystemClientSetMatching(_ client: UnsafeMutableRawPointer, _ matching: CFDictionary) -> Int32
-@_silgen_name("IOHIDEventSystemClientCopyServices")
-private func IOHIDEventSystemClientCopyServices(_ client: UnsafeMutableRawPointer) -> Unmanaged<CFArray>?
-@_silgen_name("IOHIDServiceClientCopyProperty")
-private func IOHIDServiceClientCopyProperty(_ service: UnsafeRawPointer, _ key: CFString) -> Unmanaged<CFTypeRef>?
-@_silgen_name("IOHIDServiceClientCopyEvent")
-private func IOHIDServiceClientCopyEvent(_ service: UnsafeRawPointer, _ type: Int64, _ field: Int32, _ options: Int64) -> UnsafeMutableRawPointer?
-@_silgen_name("IOHIDEventGetFloatValue")
-private func IOHIDEventGetFloatValue(_ event: UnsafeMutableRawPointer, _ field: Int64) -> Double
+// The IOHIDEventSystemClient / IOHIDServiceClient / IOHIDEvent functions below are
+// PRIVATE IOKit APIs. Binding them at launch with @_silgen_name would crash the
+// whole app (dyld "symbol not found") if Apple renames or drops one in a future
+// macOS. Instead we resolve them lazily via dlopen/dlsym (see IOHIDRuntime) and
+// degrade to "no IOHID temperature data" when a symbol is missing. These thin
+// wrappers keep the original names and signatures so the call sites are unchanged.
+private func IOHIDEventSystemClientCreate(_ allocator: CFAllocator?) -> UnsafeMutableRawPointer? {
+    IOHIDRuntime.clientCreate?(allocator)
+}
+private func IOHIDEventSystemClientSetMatching(_ client: UnsafeMutableRawPointer, _ matching: CFDictionary) -> Int32 {
+    IOHIDRuntime.clientSetMatching?(client, matching) ?? 0
+}
+private func IOHIDEventSystemClientCopyServices(_ client: UnsafeMutableRawPointer) -> Unmanaged<CFArray>? {
+    IOHIDRuntime.clientCopyServices?(client)
+}
+private func IOHIDServiceClientCopyProperty(_ service: UnsafeRawPointer, _ key: CFString) -> Unmanaged<CFTypeRef>? {
+    IOHIDRuntime.serviceCopyProperty?(service, key)
+}
+private func IOHIDServiceClientCopyEvent(_ service: UnsafeRawPointer, _ type: Int64, _ field: Int32, _ options: Int64) -> UnsafeMutableRawPointer? {
+    IOHIDRuntime.serviceCopyEvent?(service, type, field, options)
+}
+private func IOHIDEventGetFloatValue(_ event: UnsafeMutableRawPointer, _ field: Int64) -> Double {
+    IOHIDRuntime.eventGetFloatValue?(event, field) ?? 0
+}
 
 private struct SMCKeyDataVer {
     var major: UInt8 = 0
@@ -127,7 +139,7 @@ private final class SMCReader {
 
     func readFloatValue(for key: String) -> Double? {
         guard let (type, data) = readValue(for: key), type == "flt ", data.count >= 4 else { return nil }
-        let bits = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        let bits = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         return Double(Float(bitPattern: UInt32(littleEndian: bits)))
     }
 
@@ -136,7 +148,7 @@ private final class SMCReader {
         switch type {
         case "flt ":
             guard data.count >= 4 else { return nil }
-            let bits = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            let bits = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             return Double(Float(bitPattern: UInt32(littleEndian: bits)))
         case "fpe2":
             guard data.count >= 2 else { return nil }
@@ -262,6 +274,37 @@ private enum IOReportRuntime {
     }
 }
 
+private enum IOHIDRuntime {
+    typealias ClientCreateFn = @convention(c) (CFAllocator?) -> UnsafeMutableRawPointer?
+    typealias ClientSetMatchingFn = @convention(c) (UnsafeMutableRawPointer, CFDictionary) -> Int32
+    typealias ClientCopyServicesFn = @convention(c) (UnsafeMutableRawPointer) -> Unmanaged<CFArray>?
+    typealias ServiceCopyPropertyFn = @convention(c) (UnsafeRawPointer, CFString) -> Unmanaged<CFTypeRef>?
+    typealias ServiceCopyEventFn = @convention(c) (UnsafeRawPointer, Int64, Int32, Int64) -> UnsafeMutableRawPointer?
+    typealias EventGetFloatValueFn = @convention(c) (UnsafeMutableRawPointer, Int64) -> Double
+
+    private struct LibraryHandle: @unchecked Sendable {
+        let raw: UnsafeMutableRawPointer?
+    }
+
+    private static let libraryHandle = LibraryHandle(
+        raw: dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL)
+    )
+
+    private static func load<T>(_ symbol: String, as type: T.Type) -> T? {
+        guard let raw = dlsym(libraryHandle.raw, symbol) else {
+            return nil
+        }
+        return unsafeBitCast(raw, to: type)
+    }
+
+    static let clientCreate = load("IOHIDEventSystemClientCreate", as: ClientCreateFn.self)
+    static let clientSetMatching = load("IOHIDEventSystemClientSetMatching", as: ClientSetMatchingFn.self)
+    static let clientCopyServices = load("IOHIDEventSystemClientCopyServices", as: ClientCopyServicesFn.self)
+    static let serviceCopyProperty = load("IOHIDServiceClientCopyProperty", as: ServiceCopyPropertyFn.self)
+    static let serviceCopyEvent = load("IOHIDServiceClientCopyEvent", as: ServiceCopyEventFn.self)
+    static let eventGetFloatValue = load("IOHIDEventGetFloatValue", as: EventGetFloatValueFn.self)
+}
+
 private struct ANEIOReportChannelMetadata {
     let group: String
     let subgroup: String
@@ -348,7 +391,11 @@ private final class ANEIOReportSampler: @unchecked Sendable {
         CFDictionarySetValue(mutableChannels, key, unsafeBitCast(selected, to: UnsafeRawPointer.self))
 
         var subscriptionChannels: Unmanaged<CFMutableDictionary>?
-        guard let subscription = createSubscription(nil, mutableChannels, &subscriptionChannels, 0, nil) else {
+        let subscriptionPtr = createSubscription(nil, mutableChannels, &subscriptionChannels, 0, nil)
+        // The subscribed-channels out-param is created +1 but we sample against the
+        // desired-channels dict (mutableChannels), so release it to avoid a leak.
+        subscriptionChannels?.release()
+        guard let subscription = subscriptionPtr else {
             return nil
         }
 
@@ -658,6 +705,10 @@ final class SystemMonitor: ObservableObject {
     private var previousNetworkCounters: [String: (in: UInt64, out: UInt64)] = [:]
     private var aneIOReportSampler: ANEIOReportSampler?
     private var lastSampleDate = Date()
+    /// The measured elapsed time of the most recent refresh() tick. Per-process
+    /// CPU%/rate math divides deltas by this (not the nominal refresh interval) so
+    /// the Processes, Details, and Users tabs all agree with the aggregate gauge.
+    private var lastMeasuredInterval: TimeInterval = 1.0
     private let hostPort = mach_host_self()
     private let pageSize: UInt64
     private let hostCPULoadInfoCount = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
@@ -862,6 +913,7 @@ final class SystemMonitor: ObservableObject {
         let now = Date()
         let interval = max(now.timeIntervalSince(lastSampleDate), 0.4)
         lastSampleDate = now
+        lastMeasuredInterval = interval
 
         refreshCPU(interval: interval)
         refreshMemory()
@@ -1442,12 +1494,12 @@ final class SystemMonitor: ObservableObject {
         let previousCPU = previousProcessCPUTime[pid] ?? totalCPU
         let cpuDelta = totalCPU >= previousCPU ? totalCPU - previousCPU : 0
         let logicalCores = max(cpu.logicalCores, 1)
-        var cpuPercent = min(max((Double(cpuDelta) / max(refreshSpeed.interval ?? 1.0, 0.5) / 1_000_000_000.0) / Double(logicalCores) * 100, 0), 999)
+        var cpuPercent = min(max((Double(cpuDelta) / max(lastMeasuredInterval, 0.4) / 1_000_000_000.0) / Double(logicalCores) * 100, 0), 999)
         if cpuPercent > 0 && cpuPercent < 0.1 {
             cpuPercent = 0.1
         }
 
-        let sampleInterval = max(refreshSpeed.interval ?? 1.0, 0.5)
+        let sampleInterval = max(lastMeasuredInterval, 0.4)
 
         let currentDisk: (read: UInt64, write: UInt64) = (info.diskReadBytes, info.diskWriteBytes)
         let previousDisk = previousProcessRUsage[pid] ?? currentDisk
@@ -3044,7 +3096,7 @@ extension SystemMonitor {
         let previousCPU = previousProcessCPUTime[pid] ?? totalCPUTime
         let delta = totalCPUTime >= previousCPU ? totalCPUTime - previousCPU : 0
         let logicalCores = max(cpu.logicalCores, 1)
-        var cpuPercent = min(max((Double(delta) / max(refreshSpeed.interval ?? 1.0, 0.5) / 1_000_000_000.0) / Double(logicalCores) * 100, 0), 999)
+        var cpuPercent = min(max((Double(delta) / max(lastMeasuredInterval, 0.4) / 1_000_000_000.0) / Double(logicalCores) * 100, 0), 999)
         if cpuPercent > 0 && cpuPercent < 0.1 {
             cpuPercent = 0.1
         }
