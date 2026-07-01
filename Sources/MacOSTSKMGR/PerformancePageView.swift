@@ -600,18 +600,22 @@ struct PerformancePageView: View {
     }
 
     private func rightInfo(_ pairs: [InfoPair]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // A Grid sizes the label column to the widest label automatically, so long
+        // labels (e.g. "Performance-core base speed") never overflow into the value
+        // column, while every value stays aligned.
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 16, verticalSpacing: 6) {
             ForEach(pairs) { pair in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                GridRow {
                     Text(pair.label)
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 128, alignment: .leading)
+                        .gridColumnAlignment(.leading)
                     Text(pair.value)
                         .font(.system(size: 14))
                         .foregroundStyle(AppTheme.primaryText(colorScheme))
+                        .lineLimit(1)
+                        .gridColumnAlignment(.leading)
                 }
             }
         }
