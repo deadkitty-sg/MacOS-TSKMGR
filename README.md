@@ -88,6 +88,21 @@ Development is centered around the Xcode project, and releases are provided as s
 
 Because there is no active Apple Developer Program signing setup for this project, it does not currently ship with a formal production signature and is not distributed through the Mac App Store. For now, distribution and testing still rely on manually allowing the app through Gatekeeper.
 
+发布包会做 ad-hoc 本地签名（非 Developer ID、未经过 Apple 公证），只是为了让 Apple Silicon 上的 Gatekeeper 允许运行。首次运行请按以下步骤：
+
+The release archive is ad-hoc signed (not a Developer ID signature and not notarized) purely so that Gatekeeper on Apple Silicon will launch it. On first launch:
+
+1. 将 `MacOSTSKMGR.app` 拖到 `/Applications`（或任意目录）。/ Move `MacOSTSKMGR.app` into `/Applications` (or any folder).
+2. 移除隔离标记 / Remove the quarantine attribute:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/MacOSTSKMGR.app
+   ```
+
+3. 首次打开时右键点击图标并选择“打开”，在弹窗中再次确认。/ Right-click the app icon and choose **Open**, then confirm in the dialog (only needed the first time).
+
+如果看到“已损坏 / is damaged”提示，通常是隔离标记或签名在解压时被破坏所致——请改用发布提供的 `.zip`（由 `ditto` 打包），并重新执行第 2 步。/ If macOS reports the app is "damaged", the quarantine flag or signature was usually broken during unzip — use the provided `.zip` (packaged with `ditto`) and re-run step 2.
+
 ## 风险与说明 / Notes and Limitations
 
 部分硬件监控能力依赖私有或非公开文档的系统接口，因此未来 macOS 更新、芯片代际变化或不同机型之间，某些指标可能需要重新校准或重新映射。尤其是 Apple Silicon 上的核心层级识别、NPU 图表含义与板级温度映射，都属于“持续验证、逐步修正”的工程范围，而不是 Apple 官方保证长期稳定的公开契约。

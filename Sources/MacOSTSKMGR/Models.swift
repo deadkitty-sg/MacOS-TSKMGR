@@ -546,12 +546,90 @@ struct AppHistoryRowData: Identifiable {
     let meteredNetworkBytes: UInt64
 }
 
+/// Typed launchd service state. Program logic (sorting, start/stop gating) keys
+/// off this enum; localization is a pure `displayTitle(in:)` presentation concern
+/// so a wording change or a new language can never break behavior.
+enum ServiceStatus: Equatable {
+    case running
+    case onDemand
+    case loaded
+    case stopped
+    case notLoaded
+    case disabled
+    case unknown
+
+    /// Parse the canonical status string emitted by the launchd probe (English),
+    /// tolerating an already-localized Chinese value defensively.
+    init(canonical raw: String) {
+        switch raw {
+        case "Running", "正在运行": self = .running
+        case "On demand", "按需": self = .onDemand
+        case "Loaded", "已加载": self = .loaded
+        case "Stopped", "已停止": self = .stopped
+        case "Not loaded", "未加载": self = .notLoaded
+        case "Disabled", "已禁用": self = .disabled
+        default: self = .unknown
+        }
+    }
+
+    var sortRank: Int {
+        switch self {
+        case .running: 0
+        case .onDemand: 1
+        case .loaded: 2
+        case .stopped: 3
+        case .notLoaded: 4
+        case .disabled: 5
+        case .unknown: 6
+        }
+    }
+
+    var canStart: Bool { self == .stopped || self == .notLoaded || self == .disabled }
+    var canStop: Bool { self == .running || self == .onDemand || self == .loaded }
+    var canRestart: Bool { self == .running }
+
+    func displayTitle(in language: AppLanguage) -> String {
+        switch self {
+        case .running: language.text("正在运行", "Running")
+        case .onDemand: language.text("按需", "On demand")
+        case .loaded: language.text("已加载", "Loaded")
+        case .stopped: language.text("已停止", "Stopped")
+        case .notLoaded: language.text("未加载", "Not loaded")
+        case .disabled: language.text("已禁用", "Disabled")
+        case .unknown: language.text("未知", "Unknown")
+        }
+    }
+}
+
+/// Typed launchd startup-item state (enabled/disabled).
+enum StartupState: Equatable {
+    case enabled
+    case disabled
+    case unknown
+
+    init(canonical raw: String) {
+        switch raw {
+        case "Enabled", "已启用": self = .enabled
+        case "Disabled", "已禁用": self = .disabled
+        default: self = .unknown
+        }
+    }
+
+    func displayTitle(in language: AppLanguage) -> String {
+        switch self {
+        case .enabled: language.text("已启用", "Enabled")
+        case .disabled: language.text("已禁用", "Disabled")
+        case .unknown: language.text("未知", "Unknown")
+        }
+    }
+}
+
 struct StartupItemRowData: Identifiable {
     let id: String
     let name: String
     let icon: NSImage?
     let publisher: String
-    let status: String
+    let status: StartupState
     let startupImpact: String
 }
 
@@ -561,7 +639,7 @@ struct ServiceRowData: Identifiable {
     let icon: NSImage?
     let pid: Int32?
     let serviceDescription: String
-    let status: String
+    let status: ServiceStatus
     let group: String
     let label: String
 }

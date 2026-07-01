@@ -28,6 +28,42 @@ private enum ProcessColumn {
     case trend
 }
 
+/// Reusable search/filter field shared by the Processes and Details tabs.
+struct ProcessSearchField: View {
+    @Binding var text: String
+    let colorScheme: ColorScheme
+    let language: AppLanguage
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            TextField(language.text("筛选进程", "Filter processes"), text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(language.text("清除", "Clear"))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(AppTheme.tableHeader(colorScheme), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(AppTheme.separator(colorScheme), lineWidth: 1)
+        )
+    }
+}
+
 struct ProcessesPageView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appLanguage) private var language
@@ -47,12 +83,17 @@ struct ProcessesPageView: View {
     @State private var sortKey: ProcessSortKey = .cpu
     @State private var ascending = false
     @State private var hoveredSortKey: ProcessSortKey?
+    @State private var searchText = ""
 
     var body: some View {
         GeometryReader { proxy in
             let widths = scaledWidths(for: proxy.size.width)
 
             VStack(alignment: .leading, spacing: 0) {
+                ProcessSearchField(text: $searchText, colorScheme: colorScheme, language: language)
+                    .frame(width: min(widths.total, 340), alignment: .leading)
+                    .padding(.bottom, 8)
+
                 processHeaderRow(widths: widths)
                     .frame(width: widths.total, alignment: .leading)
 
@@ -79,8 +120,17 @@ struct ProcessesPageView: View {
     }
 
     private var sortedSections: [ProcessSectionData] {
-        monitor.processSections.map { section in
-            ProcessSectionData(title: section.title, rows: section.rows.sorted(by: compareRows))
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return monitor.processSections.map { section in
+            var rows = section.rows
+            if !query.isEmpty {
+                rows = rows.filter { row in
+                    row.name.lowercased().contains(query)
+                        || String(row.pid).contains(query)
+                        || row.path.lowercased().contains(query)
+                }
+            }
+            return ProcessSectionData(title: section.title, rows: rows.sorted(by: compareRows))
         }
     }
 

@@ -8,6 +8,7 @@ import IOKit
 import IOKit.storage
 import CoreFoundation
 import CoreWLAN
+import MetricsKit
 
 @_silgen_name("CFRelease")
 private func CFReleaseShim(_ cf: CFTypeRef?)
@@ -392,7 +393,7 @@ private final class ANEIOReportSampler: @unchecked Sendable {
                 }
             }
 
-            let next = rawSample()
+            guard let next = rawSample() else { break }
             let elapsedNanoseconds = next.time.uptimeNanoseconds - previous.time.uptimeNanoseconds
             let elapsedMilliseconds = max(UInt64(elapsedNanoseconds / 1_000_000), 1)
 
@@ -432,11 +433,14 @@ private final class ANEIOReportSampler: @unchecked Sendable {
         )
     }
 
-    private func rawSample() -> (sample: CFDictionary, time: DispatchTime) {
+    private func rawSample() -> (sample: CFDictionary, time: DispatchTime)? {
         guard let createSamples = IOReportRuntime.createSamples,
               let sample = createSamples(subscription, channels, nil)?.takeRetainedValue()
         else {
-            fatalError("IOReport runtime became unavailable after sampler initialization")
+            // IOReport can stop responding after a macOS point update or a
+            // thermal/policy change. Degrade to "no ANE data" instead of
+            // crashing the whole app on a background sampling tick.
+            return nil
         }
         return (sample, .now())
     }
@@ -592,6 +596,28 @@ private final class ANEIOReportSampler: @unchecked Sendable {
     }
 }
 
+/// Plain, `Sendable` per-process data gathered purely from C syscalls (no icon,
+/// no AppKit). This is what the off-main collector produces; the icon and any
+/// AppKit-affine work are attached later on the main actor.
+struct ProcessRawSnapshot: Sendable {
+    let pid: Int32
+    let displayName: String
+    let path: String
+    let residentSize: UInt64
+    let totalCPUTime: UInt64
+    let diskReadBytes: UInt64
+    let diskWriteBytes: UInt64
+    let energyNanojoules: UInt64
+    let packageIdleWakeups: UInt64
+    let interruptWakeups: UInt64
+    let threadCount: Int
+    let openFiles: Int
+    let isApplication: Bool
+    let uid: uid_t
+    let bsdStatus: UInt32
+    let flags: UInt32
+}
+
 @MainActor
 final class SystemMonitor: ObservableObject {
     @Published var language: AppLanguage = .chinese
@@ -667,6 +693,18 @@ final class SystemMonitor: ObservableObject {
     private var lastGPUProbeDate: Date = .distantPast
     private var lastNPUUsageProbeDate: Date = .distantPast
     private var lastStartupRefreshDate: Date = .distantPast
+    private let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 1024
+        return cache
+    }()
+    // Per-tick memoization so a single refresh() pass enumerates PIDs and reads
+    // proc_pidinfo at most once per process, even though several page builders
+    // (processes/details/users/history) all need the same snapshot.
+    private var tickPIDsCache: [Int32]?
+    private var tickProcessSnapshotCache: [Int32: ProcessSnapshot]?
+    private var activePage: TaskTab = .processes
+    private var processCollectionTask: Task<Void, Never>?
 
     init() {
         var pageSizeValue: vm_size_t = 0
@@ -832,15 +870,12 @@ final class SystemMonitor: ObservableObject {
         refreshNPUs()
         refreshGPUs()
         refreshThermal(interval: interval)
-        refreshProcesses(interval: interval)
-        refreshAppHistory()
+        // The heavy per-PID enumeration runs OFF the main actor. When it finishes
+        // it hops back to the main actor and applies the process/detail/user/history
+        // rows plus the CPU process/thread/handle counts — see applyProcessCollection.
+        scheduleProcessCollection(interval: interval)
         refreshStartupItems()
-        refreshCurrentUserApps()
-        refreshDetailProcessRows()
 
-        cpu.processCount = processSections.reduce(0) { $0 + $1.rows.count }
-        cpu.threadCount = processSections.flatMap(\.rows).reduce(0) { $0 + $1.threadCount }
-        cpu.openFilesCount = processSections.flatMap(\.rows).reduce(0) { $0 + $1.openFiles }
         cpu.uptimeText = DisplayFormat.uptime(ProcessInfo.processInfo.systemUptime)
         requestSupplementalRefreshes(ifNeededAt: now)
     }
@@ -852,6 +887,85 @@ final class SystemMonitor: ObservableObject {
         lastGPUProbeDate = .distantPast
         lastNPUUsageProbeDate = .distantPast
         refresh()
+    }
+
+    private func beginTick() {
+        tickPIDsCache = nil
+        tickProcessSnapshotCache = [:]
+    }
+
+    private func endTick() {
+        tickPIDsCache = nil
+        tickProcessSnapshotCache = nil
+    }
+
+    /// Called by the UI when the visible tab changes. Records which page is
+    /// active (so refresh() can skip hidden per-page enumeration) and eagerly
+    /// populates the newly visible page so switching tabs never shows stale rows.
+    func setActivePage(_ page: TaskTab) {
+        guard activePage != page else { return }
+        activePage = page
+        guard hasStarted, !isTemporarilyPaused else { return }
+        beginTick()
+        defer { endTick() }
+        switch page {
+        case .history: refreshAppHistory()
+        case .users: refreshCurrentUserApps()
+        case .details: refreshDetailProcessRows()
+        default: break
+        }
+    }
+
+    /// Runs the expensive per-PID syscall sweep off the main actor, then hops back
+    /// to build the rows. Overlapping ticks are skipped so a slow sweep can never
+    /// queue up behind the timer and saturate the CPU.
+    private func scheduleProcessCollection(interval: TimeInterval) {
+        guard processCollectionTask == nil else { return }
+        processCollectionTask = Task.detached(priority: .utility) {
+            let pids = self.collectAllPIDs()
+            var raws: [ProcessRawSnapshot] = []
+            raws.reserveCapacity(pids.count)
+            for pid in pids where pid > 0 {
+                if let raw = self.collectRawProcessSnapshot(pid: pid) {
+                    raws.append(raw)
+                }
+            }
+            await MainActor.run {
+                self.applyProcessCollection(raws: raws, interval: interval)
+                self.processCollectionTask = nil
+            }
+        }
+    }
+
+    /// Main-actor stage of process collection: seed the per-tick caches from the
+    /// off-main raw snapshots (attaching cached icons — an AppKit call that must
+    /// run on main) so the existing row builders read them without issuing any
+    /// syscalls on the UI thread.
+    private func applyProcessCollection(raws: [ProcessRawSnapshot], interval: TimeInterval) {
+        var snapshotCache: [Int32: ProcessSnapshot] = [:]
+        snapshotCache.reserveCapacity(raws.count)
+        var pids: [Int32] = []
+        pids.reserveCapacity(raws.count)
+        for raw in raws {
+            snapshotCache[raw.pid] = ProcessSnapshot(raw: raw, icon: iconForProcess(path: raw.path))
+            pids.append(raw.pid)
+        }
+        tickPIDsCache = pids
+        tickProcessSnapshotCache = snapshotCache
+        defer {
+            tickPIDsCache = nil
+            tickProcessSnapshotCache = nil
+        }
+
+        refreshProcesses(interval: interval)
+        // Per-page tables are only rebuilt for the visible tab.
+        if activePage == .history { refreshAppHistory() }
+        if activePage == .users { refreshCurrentUserApps() }
+        if activePage == .details { refreshDetailProcessRows() }
+
+        cpu.processCount = processSections.reduce(0) { $0 + $1.rows.count }
+        cpu.threadCount = processSections.flatMap(\.rows).reduce(0) { $0 + $1.threadCount }
+        cpu.openFilesCount = processSections.flatMap(\.rows).reduce(0) { $0 + $1.openFiles }
     }
 
     func refreshServicesNow() {
@@ -1023,7 +1137,7 @@ final class SystemMonitor: ObservableObject {
                         name: row.name,
                         icon: row.iconProgramPath.flatMap { self.startupItemIcon(fromProgramPath: $0) },
                         publisher: row.publisher,
-                        status: row.status,
+                        status: StartupState(canonical: row.status),
                         startupImpact: row.startupImpact
                     )
                 }
@@ -1050,7 +1164,7 @@ final class SystemMonitor: ObservableObject {
                         icon: row.iconProgramPath.flatMap { self.startupItemIcon(fromProgramPath: $0) },
                         pid: row.pid,
                         serviceDescription: row.serviceDescription,
-                        status: row.status,
+                        status: ServiceStatus(canonical: row.status),
                         group: row.group,
                         label: row.label
                     )
@@ -1071,15 +1185,16 @@ final class SystemMonitor: ObservableObject {
         guard kr == KERN_SUCCESS else { return }
 
         let ticks = loadInfo.cpu_ticks
-        let total = UInt64(ticks.0 + ticks.1 + ticks.2 + ticks.3)
-        let idle = UInt64(ticks.2)
-        let deltaTotal = max(total - previousTotalCPUTime, 1)
-        let deltaIdle = idle - previousIdleCPUTime
-        previousTotalCPUTime = total
-        previousIdleCPUTime = idle
-
-        let activePercent = Double(deltaTotal - deltaIdle) / Double(deltaTotal) * 100
-        cpu.utilizationPercent = max(0, min(activePercent, 100))
+        // Overflow/underflow-safe aggregate utilization lives in MetricsKit so it
+        // is unit-tested against high-uptime and counter-reset fixtures.
+        let aggregate = CPUMetrics.aggregateUtilizationPercent(
+            userSystemIdleNice: (ticks.0, ticks.1, ticks.2, ticks.3),
+            previousTotal: previousTotalCPUTime,
+            previousIdle: previousIdleCPUTime
+        )
+        previousTotalCPUTime = aggregate.total
+        previousIdleCPUTime = aggregate.idle
+        cpu.utilizationPercent = aggregate.percent
         cpu.speedText = currentPrimaryCPUSpeedText()
         cpu.history = shifted(cpu.history, adding: cpu.utilizationPercent)
 
@@ -1103,9 +1218,9 @@ final class SystemMonitor: ObservableObject {
                 cpu.coreHistories = zip(coreLoads, previousPerCoreLoads).enumerated().map { index, pair in
                     let current = pair.0
                     let previous = pair.1
-                    let totalDelta = zip(current, previous).reduce(UInt32(0)) { $0 + max($1.0 - $1.1, 0) }
-                    let idleDelta = max(current[2] - previous[2], 0)
-                    let usage = totalDelta == 0 ? 0 : Double(totalDelta - idleDelta) / Double(totalDelta) * 100
+                    // Saturating, overflow-safe per-core utilization (MetricsKit,
+                    // unit-tested against parked-core / counter-reset fixtures).
+                    let usage = CPUMetrics.coreUtilizationPercent(current: current, previous: previous)
                     let existing = cpu.coreHistories.indices.contains(index) ? cpu.coreHistories[index] : Array(repeating: 0, count: 60)
                     return shifted(existing, adding: usage)
                 }
@@ -2116,6 +2231,26 @@ extension SystemMonitor {
         let uid: uid_t
         let bsdStatus: UInt32
         let flags: UInt32
+
+        init(raw: ProcessRawSnapshot, icon: NSImage?) {
+            self.pid = raw.pid
+            self.displayName = raw.displayName
+            self.path = raw.path
+            self.residentSize = raw.residentSize
+            self.totalCPUTime = raw.totalCPUTime
+            self.diskReadBytes = raw.diskReadBytes
+            self.diskWriteBytes = raw.diskWriteBytes
+            self.energyNanojoules = raw.energyNanojoules
+            self.packageIdleWakeups = raw.packageIdleWakeups
+            self.interruptWakeups = raw.interruptWakeups
+            self.threadCount = raw.threadCount
+            self.openFiles = raw.openFiles
+            self.isApplication = raw.isApplication
+            self.icon = icon
+            self.uid = raw.uid
+            self.bsdStatus = raw.bsdStatus
+            self.flags = raw.flags
+        }
     }
 
     struct InterfaceSnapshot {
@@ -2270,7 +2405,7 @@ extension SystemMonitor {
                         name: name,
                         icon: startupItemIcon(fromProgramPath: program),
                         publisher: publisher,
-                        status: enabled ? "Enabled" : "Disabled",
+                        status: enabled ? .enabled : .disabled,
                         startupImpact: impact
                     )
                 )
@@ -2829,6 +2964,14 @@ extension SystemMonitor {
     }
 
     func listPIDs() -> [Int32] {
+        if let cached = tickPIDsCache { return cached }
+        let result = collectAllPIDs()
+        if tickProcessSnapshotCache != nil { tickPIDsCache = result }
+        return result
+    }
+
+    /// Pure syscall PID enumeration, safe to run off the main actor.
+    nonisolated func collectAllPIDs() -> [Int32] {
         let bufferSize = proc_listallpids(nil, 0)
         guard bufferSize > 0 else { return [] }
         let count = bufferSize / Int32(MemoryLayout<pid_t>.size)
@@ -2839,6 +2982,21 @@ extension SystemMonitor {
     }
 
     func processInfo(pid: Int32) -> ProcessSnapshot? {
+        if let snapshot = tickProcessSnapshotCache?[pid] { return snapshot }
+        guard let snapshot = computeProcessInfo(pid: pid) else { return nil }
+        if tickProcessSnapshotCache != nil { tickProcessSnapshotCache?[pid] = snapshot }
+        return snapshot
+    }
+
+    private func computeProcessInfo(pid: Int32) -> ProcessSnapshot? {
+        guard let raw = collectRawProcessSnapshot(pid: pid) else { return nil }
+        return ProcessSnapshot(raw: raw, icon: iconForProcess(path: raw.path))
+    }
+
+    /// Pure C-syscall process sampling with no AppKit/icon work, so it is safe to
+    /// run off the main actor. The icon (an AppKit call) is attached separately on
+    /// the main actor.
+    nonisolated func collectRawProcessSnapshot(pid: Int32) -> ProcessRawSnapshot? {
         var taskInfo = proc_taskinfo()
         let taskResult = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(MemoryLayout<proc_taskinfo>.size))
         guard taskResult == Int32(MemoryLayout<proc_taskinfo>.size) else { return nil }
@@ -2862,7 +3020,7 @@ extension SystemMonitor {
         }
 
         let app = path.hasSuffix(".app") || path.contains("/Applications/") || path.contains("/System/Applications/")
-        return ProcessSnapshot(
+        return ProcessRawSnapshot(
             pid: pid,
             displayName: displayName,
             path: path,
@@ -2876,7 +3034,6 @@ extension SystemMonitor {
             threadCount: Int(taskInfo.pti_threadnum),
             openFiles: Int(bsdInfo.pbi_nfiles),
             isApplication: app,
-            icon: iconForProcess(path: path),
             uid: bsdInfo.pbi_uid,
             bsdStatus: bsdInfo.pbi_status,
             flags: bsdInfo.pbi_flags
@@ -2925,7 +3082,7 @@ extension SystemMonitor {
         }
     }
 
-    func pidPath(pid: Int32) -> String {
+    nonisolated func pidPath(pid: Int32) -> String {
         var pathBuffer = Array(repeating: CChar(0), count: pidPathInfoMaxSize)
         let result = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
         guard result > 0 else { return "" }
@@ -2934,16 +3091,29 @@ extension SystemMonitor {
 
     func iconForProcess(path: String) -> NSImage? {
         guard !path.isEmpty else { return nil }
+        // Resolve to the enclosing .app bundle (if any) so the cache key is the
+        // thing whose icon we actually fetch.
+        let resolvedPath: String
         if path.hasSuffix(".app") {
-            return NSWorkspace.shared.icon(forFile: path)
+            resolvedPath = path
+        } else {
+            let nsPath = path as NSString
+            let range = nsPath.range(of: ".app/")
+            if range.location != NSNotFound, let swiftRange = Range(range, in: path) {
+                resolvedPath = String(String(path[..<swiftRange.upperBound]).dropLast())
+            } else {
+                resolvedPath = path
+            }
         }
-        let nsPath = path as NSString
-        let range = nsPath.range(of: ".app/")
-        if range.location != NSNotFound, let swiftRange = Range(range, in: path) {
-            let appPath = String(path[..<swiftRange.upperBound]).dropLast()
-            return NSWorkspace.shared.icon(forFile: String(appPath))
+        // Icons for a given executable path are effectively static; caching them
+        // avoids an IconServices/disk lookup for every PID on every refresh tick.
+        let key = resolvedPath as NSString
+        if let cached = iconCache.object(forKey: key) {
+            return cached
         }
-        return NSWorkspace.shared.icon(forFile: path)
+        let icon = NSWorkspace.shared.icon(forFile: resolvedPath)
+        iconCache.setObject(icon, forKey: key)
+        return icon
     }
 
     func networkInterfaces() -> [InterfaceSnapshot] {
@@ -3657,12 +3827,12 @@ extension SystemMonitor {
         }
     }
 
-    func stringFromCBuffer(_ buffer: [CChar]) -> String {
+    nonisolated func stringFromCBuffer(_ buffer: [CChar]) -> String {
         let prefix = buffer.prefix { $0 != 0 }
         return String(decoding: prefix.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
-    func stringFromCArray(_ pointer: UnsafePointer<CChar>) -> String {
+    nonisolated func stringFromCArray(_ pointer: UnsafePointer<CChar>) -> String {
         String(cString: pointer)
     }
 }

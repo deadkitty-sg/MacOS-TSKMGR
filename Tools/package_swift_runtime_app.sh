@@ -90,10 +90,28 @@ if [ -n "$ASSETS_CAR_PATH" ] && [ -f "$ASSETS_CAR_PATH" ]; then
   cp "$ASSETS_CAR_PATH" "$APP_PATH/Contents/Resources/Assets.car"
 fi
 
+# Ad-hoc sign the bundle so Gatekeeper on Apple Silicon will run it after the
+# user clears the quarantine attribute. This is NOT a Developer ID signature and
+# is NOT notarized; it only makes an otherwise-unsigned binary launchable.
+# Sign nested libraries first, then the bundle itself.
+find "$APP_PATH/Contents/Frameworks" -type f -name "*.dylib" -print0 2>/dev/null \
+  | xargs -0 -I {} codesign --force --timestamp=none --sign - "{}" 2>/dev/null || true
+if compgen -G "$APP_PATH/Contents/MacOS/libswift*.dylib" > /dev/null; then
+  codesign --force --timestamp=none --sign - "$APP_PATH"/Contents/MacOS/libswift*.dylib 2>/dev/null || true
+fi
+codesign --force --deep --timestamp=none --sign - "$APP_PATH" 2>/dev/null \
+  || codesign --force --timestamp=none --sign - "$APP_PATH" 2>/dev/null \
+  || echo "warning: ad-hoc codesign failed; the bundle is unsigned" >&2
+
+# Use ditto (not zip) so the code signature and bundle metadata survive the
+# round-trip when the user unzips the archive.
 (
   cd "$OUTPUT_DIR"
-  /usr/bin/zip -qry "$ZIP_NAME" "$APP_NAME.app"
+  rm -f "$ZIP_NAME"
+  /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$ZIP_NAME"
 )
 
 echo "App: $APP_PATH"
 echo "Zip: $ZIP_PATH"
+echo "Signature:"
+codesign -dv "$APP_PATH" 2>&1 | sed 's/^/  /' || true

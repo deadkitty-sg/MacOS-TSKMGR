@@ -22,6 +22,8 @@
 		A0000000000000000000010C /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000C /* Theme.swift */; };
 		A0000000000000000000010D /* UsersPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000D /* UsersPageView.swift */; };
 		A0000000000000000000010E /* VisualEffects.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000E /* VisualEffects.swift */; };
+		B00000000000000000000003 /* MetricsKit in Frameworks */ = {isa = PBXBuildFile; productRef = B00000000000000000000002 /* MetricsKit */; };
+			A0000000000000000000010F /* MetricTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000F /* MetricTable.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +43,7 @@
 		A0000000000000000000000D /* UsersPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsersPageView.swift; sourceTree = "<group>"; };
 		A0000000000000000000000E /* VisualEffects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualEffects.swift; sourceTree = "<group>"; };
 		A00000000000000000000020 /* MacOSTSKMGR.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacOSTSKMGR.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0000000000000000000000F /* MetricTable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricTable.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -48,6 +51,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B00000000000000000000003 /* MetricsKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -102,6 +106,7 @@
 				A0000000000000000000000C /* Theme.swift */,
 				A0000000000000000000000D /* UsersPageView.swift */,
 				A0000000000000000000000E /* VisualEffects.swift */,
+				A0000000000000000000000F /* MetricTable.swift */,
 			);
 			path = MacOSTSKMGR;
 			sourceTree = "<group>";
@@ -123,6 +128,7 @@
 			);
 			name = MacOSTSKMGR;
 			packageProductDependencies = (
+				B00000000000000000000002 /* MetricsKit */,
 			);
 			productName = MacOSTSKMGR;
 			productReference = A00000000000000000000020 /* MacOSTSKMGR.app */;
@@ -152,6 +158,9 @@
 				Base,
 			);
 			mainGroup = A00000000000000000000040;
+			packageReferences = (
+				B00000000000000000000001 /* XCLocalSwiftPackageReference "MetricsKit" */,
+			);
 			productRefGroup = A00000000000000000000043 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -191,6 +200,7 @@
 				A0000000000000000000010C /* Theme.swift in Sources */,
 				A0000000000000000000010D /* UsersPageView.swift in Sources */,
 				A0000000000000000000010E /* VisualEffects.swift in Sources */,
+				A0000000000000000000010F /* MetricTable.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -227,7 +237,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-					CURRENT_PROJECT_VERSION = 260630v1;
+					CURRENT_PROJECT_VERSION = 260630.1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Sources/MacOSTSKMGR/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -250,7 +260,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-					CURRENT_PROJECT_VERSION = 260630v1;
+					CURRENT_PROJECT_VERSION = 260630.1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Sources/MacOSTSKMGR/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -289,6 +299,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B00000000000000000000001 /* XCLocalSwiftPackageReference "MetricsKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = MetricsKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B00000000000000000000002 /* MetricsKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MetricsKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A00000000000000000000050 /* Project object */;
 }

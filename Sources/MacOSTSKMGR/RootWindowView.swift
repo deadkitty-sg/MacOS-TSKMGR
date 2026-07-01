@@ -251,7 +251,8 @@ struct RootWindowView: View {
             resizeWindowIfNeeded(animated: true)
             updateWindowTrafficLights()
         }
-        .onChange(of: selectedTab) { _, _ in
+        .onChange(of: selectedTab) { _, newValue in
+            monitor.setActivePage(newValue)
             exitPerformanceSummaryIfNeeded()
             reconcileSelectionForCurrentTab()
             updateWindowTrafficLights()
@@ -270,6 +271,7 @@ struct RootWindowView: View {
             monitor.language = language
             monitor.temperatureUnit = temperatureUnit
             monitor.start()
+            monitor.setActivePage(selectedTab)
             updateWindowTrafficLights()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
@@ -1813,11 +1815,19 @@ enum TaskRunner {
         let errorPipe = Pipe()
         let inputPipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         if asAdmin {
-            process.arguments = ["-lc", "sudo -S -- \(input)"]
+            // Run the user's command as root via `sudo` directly, WITHOUT wrapping
+            // it in an outer login shell string. Previously the command was
+            // interpolated into `zsh -lc "sudo -S -- \(input)"`, so shell
+            // metacharacters in `input` could break out around the sudo call.
+            // Passing the command as distinct argv elements to sudo removes that
+            // outer-shell injection surface; the password is fed on stdin with an
+            // empty prompt (`-p ""`).
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            process.arguments = ["-S", "-p", "", "--", "/bin/zsh", "-lc", input]
             process.standardInput = inputPipe
         } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-lc", input]
         }
         process.standardOutput = outputPipe
@@ -1830,9 +1840,11 @@ enum TaskRunner {
         }
 
         if asAdmin {
-            if let data = "\(password)\n".data(using: .utf8) {
-                inputPipe.fileHandleForWriting.write(data)
-            }
+            // Write the password bytes, then scrub the transient buffer so the
+            // plaintext lives as briefly as possible.
+            var passwordBytes = Array((password + "\n").utf8)
+            inputPipe.fileHandleForWriting.write(Data(passwordBytes))
+            for index in passwordBytes.indices { passwordBytes[index] = 0 }
             try? inputPipe.fileHandleForWriting.close()
         }
 
@@ -1845,7 +1857,8 @@ enum TaskRunner {
             return .success
         }
 
-        if asAdmin && errorText.localizedCaseInsensitiveContains("incorrect password") {
+        if asAdmin && (errorText.localizedCaseInsensitiveContains("incorrect password")
+            || errorText.localizedCaseInsensitiveContains("try again")) {
             return .failure("Incorrect password.")
         }
 

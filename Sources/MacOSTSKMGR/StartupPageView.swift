@@ -1,194 +1,80 @@
 import SwiftUI
 
-private enum StartupColumnLayout {
-    static let insetLeading: CGFloat = 8
-    static let insetTrailing: CGFloat = 14
-    static let scrollBarReserve: CGFloat = 18
-    static let name: CGFloat = 280
-    static let publisher: CGFloat = 210
-    static let status: CGFloat = 120
-    static let impact: CGFloat = 110
-    static let totalWidth: CGFloat = name + publisher + status + impact
-    static let rowHeight: CGFloat = 34
-    static let headerHeight: CGFloat = 44
-}
-
-private enum StartupSortKey {
-    case name
-    case publisher
-    case status
-    case impact
-}
-
 struct StartupPageView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appLanguage) private var language
     @ObservedObject var monitor: SystemMonitor
-    @State private var sortKey: StartupSortKey = .name
-    @State private var ascending = true
     @State private var selectedRowID: String?
 
     var body: some View {
-        GeometryReader { proxy in
-            let widths = scaledWidths(for: proxy.size.width)
-
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Spacer()
-                    Text(language.text("本次系统启动时间: ", "Startup time: ") + "\(String(format: "%.1f", monitor.currentBootDurationSeconds())) " + language.text("秒", "s"))
-                        .font(.system(size: 14))
-                        .foregroundStyle(AppTheme.primaryText(colorScheme))
-                }
-                .frame(width: widths.total, alignment: .trailing)
-                .padding(.bottom, 10)
-
-                HStack(spacing: 0) {
-                    headerCell(language.text("名称", "Name"), sortKey: .name, width: widths.name)
-                    headerCell(language.text("发布者", "Publisher"), sortKey: .publisher, width: widths.publisher)
-                    headerCell(language.text("状态", "Status"), sortKey: .status, width: widths.status)
-                    headerCell(language.text("启动影响", "Impact"), sortKey: .impact, width: widths.impact)
-                }
-                .frame(width: widths.total, height: StartupColumnLayout.headerHeight, alignment: .leading)
-                .background(AppTheme.tableHeader(colorScheme))
-                .overlay(alignment: .bottom) {
-                    Rectangle().fill(AppTheme.strongSeparator(colorScheme)).frame(height: 1)
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
-                            HStack(spacing: 0) {
-                                nameRowCell(row, width: widths.name)
-                                rowCell(language.localizeDirectoryLabel(row.publisher), width: widths.publisher, align: .leading)
-                                rowCell(statusText(for: row), width: widths.status, align: .leading)
-                                rowCell(language.localizeStartupImpact(row.startupImpact), width: widths.impact, align: .leading)
-                            }
-                            .frame(height: StartupColumnLayout.rowHeight)
-                            .background(startupRowBackground(row, rowIndex: index))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedRowID = row.id
-                            }
-                            .contextMenu {
-                                Button(toggleMenuTitle(for: row)) {
-                                    toggleStartupItem(row)
-                                }
-                                .disabled(!canToggleStartupItem(row))
-
-                                Button(language.text("打开文件所在的位置", "Open file location")) {
-                                    revealStartupItem(row)
-                                }
-                                .disabled(!canRevealStartupItem(row))
-
-                                Button(language.text("在线搜索", "Search online")) {
-                                    searchStartupItem(row)
-                                }
-
-                                Button(language.text("属性", "Properties")) {
-                                    showStartupItemProperties(row)
-                                }
-                                .disabled(!canShowStartupItemProperties(row))
-                            }
-                        }
-                    }
-                    .frame(width: widths.total, alignment: .leading)
-                    .padding(.bottom, 16)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Spacer()
+                Text(language.text("本次系统启动时间: ", "Startup time: ") + "\(String(format: "%.1f", monitor.currentBootDurationSeconds())) " + language.text("秒", "s"))
+                    .font(.system(size: 14))
+                    .foregroundStyle(AppTheme.primaryText(colorScheme))
             }
             .padding(.top, 18)
-            .padding(.leading, StartupColumnLayout.insetLeading)
-            .padding(.trailing, StartupColumnLayout.insetTrailing)
-        }
-    }
+            .padding(.leading, 8)
+            .padding(.trailing, 14)
+            .padding(.bottom, 10)
 
-    private var sortedRows: [StartupItemRowData] {
-        monitor.startupRows.sorted { lhs, rhs in
-            let result: Bool
-            switch sortKey {
-            case .name:
-                result = lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-            case .publisher:
-                result = lhs.publisher.localizedStandardCompare(rhs.publisher) == .orderedAscending
-            case .status:
-                result = lhs.status.localizedStandardCompare(rhs.status) == .orderedAscending
-            case .impact:
-                result = lhs.startupImpact.localizedStandardCompare(rhs.startupImpact) == .orderedAscending
-            }
-            return ascending ? result : !result
-        }
-    }
+            MetricTable(
+                rows: monitor.startupRows,
+                columns: columns,
+                initialSortColumnID: "name",
+                initialAscending: true,
+                minUsableWidth: 720,
+                topPadding: 0,
+                isSelected: { $0.id == selectedRowID },
+                onSelect: { selectedRowID = $0.id },
+                rowMenu: { row in
+                    Button(toggleMenuTitle(for: row)) {
+                        toggleStartupItem(row)
+                    }
+                    .disabled(!canToggleStartupItem(row))
 
-    private func headerCell(_ title: String, sortKey: StartupSortKey, width: CGFloat) -> some View {
-        Button {
-            if self.sortKey == sortKey {
-                ascending.toggle()
-            } else {
-                self.sortKey = sortKey
-                ascending = true
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 13))
-                    .lineLimit(1)
-                if self.sortKey == sortKey {
-                    Image(systemName: ascending ? "arrow.up" : "arrow.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
+                    Button(language.text("打开文件所在的位置", "Open file location")) {
+                        revealStartupItem(row)
+                    }
+                    .disabled(!canRevealStartupItem(row))
+
+                    Button(language.text("在线搜索", "Search online")) {
+                        searchStartupItem(row)
+                    }
+
+                    Button(language.text("属性", "Properties")) {
+                        showStartupItemProperties(row)
+                    }
+                    .disabled(!canShowStartupItemProperties(row))
                 }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .frame(width: width, height: StartupColumnLayout.headerHeight, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-        .overlay(alignment: .trailing) {
-            Rectangle().fill(AppTheme.separator(colorScheme)).frame(width: 1)
+            )
         }
     }
 
-    private func rowCell(_ value: String, width: CGFloat, align: Alignment) -> some View {
-        Text(value)
-            .font(.system(size: 13))
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .frame(width: width, height: StartupColumnLayout.rowHeight, alignment: align)
-            .foregroundStyle(AppTheme.primaryText(colorScheme))
-            .overlay(alignment: .trailing) {
-                Rectangle().fill(AppTheme.separator(colorScheme)).frame(width: 1)
-            }
-    }
-
-    private func nameRowCell(_ row: StartupItemRowData, width: CGFloat) -> some View {
-        HStack(spacing: 8) {
-            ProcessIconView(icon: row.icon)
-            Text(row.name)
-                .font(.system(size: 13))
-                .lineLimit(1)
-                .foregroundStyle(AppTheme.primaryText(colorScheme))
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-        .frame(width: width, height: StartupColumnLayout.rowHeight, alignment: .leading)
-        .overlay(alignment: .trailing) {
-            Rectangle().fill(AppTheme.separator(colorScheme)).frame(width: 1)
-        }
-    }
-
-    private func startupRowBackground(_ row: StartupItemRowData, rowIndex: Int) -> Color {
-        if selectedRowID == row.id {
-            return AppTheme.selectedRow(colorScheme)
-        }
-        return rowIndex.isMultiple(of: 2) ? AppTheme.rowEven(colorScheme) : AppTheme.rowOdd(colorScheme)
-    }
-
-    private func statusText(for row: StartupItemRowData) -> String {
-        let raw = isDisabled(row) ? language.text("已禁用", "Disabled") : row.status
-        return language.localizeStartupStatus(raw)
+    private var columns: [MetricColumn<StartupItemRowData>] {
+        [
+            MetricColumn(
+                id: "name",
+                title: language.text("名称", "Name"),
+                baseWidth: 280,
+                comparator: { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+                cell: { AnyView(MetricTableNameCell(icon: $0.icon, name: $0.name)) }
+            ),
+            .text(id: "publisher", title: language.text("发布者", "Publisher"), baseWidth: 210,
+                  comparator: { $0.publisher.localizedStandardCompare($1.publisher) == .orderedAscending },
+                  value: { language.localizeDirectoryLabel($0.publisher) }),
+            .text(id: "status", title: language.text("状态", "Status"), baseWidth: 120,
+                  comparator: { $0.status.displayTitle(in: language).localizedStandardCompare($1.status.displayTitle(in: language)) == .orderedAscending },
+                  value: { $0.status.displayTitle(in: language) }),
+            .text(id: "impact", title: language.text("启动影响", "Impact"), baseWidth: 110,
+                  comparator: { $0.startupImpact.localizedStandardCompare($1.startupImpact) == .orderedAscending },
+                  value: { language.localizeStartupImpact($0.startupImpact) }),
+        ]
     }
 
     private func isDisabled(_ row: StartupItemRowData) -> Bool {
-        language.localizeStartupStatus(row.status) == "已禁用"
+        row.status == .disabled
     }
 
     private func toggleMenuTitle(for row: StartupItemRowData) -> String {
@@ -302,29 +188,4 @@ struct StartupPageView: View {
         process.arguments = ["-e", script]
         try? process.run()
     }
-
-    private func scaledWidths(for availableWidth: CGFloat) -> StartupScaledWidths {
-        let usableWidth = max(
-            720,
-            availableWidth - StartupColumnLayout.insetLeading - StartupColumnLayout.insetTrailing - StartupColumnLayout.scrollBarReserve
-        )
-        let scale = usableWidth / StartupColumnLayout.totalWidth
-        return StartupScaledWidths(scale: scale)
-    }
-}
-
-private struct StartupScaledWidths {
-    let name: CGFloat
-    let publisher: CGFloat
-    let status: CGFloat
-    let impact: CGFloat
-
-    init(scale: CGFloat) {
-        name = StartupColumnLayout.name * scale
-        publisher = StartupColumnLayout.publisher * scale
-        status = StartupColumnLayout.status * scale
-        impact = StartupColumnLayout.impact * scale
-    }
-
-    var total: CGFloat { name + publisher + status + impact }
 }
