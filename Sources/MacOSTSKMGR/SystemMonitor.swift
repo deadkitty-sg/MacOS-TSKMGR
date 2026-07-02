@@ -9,6 +9,7 @@ import IOKit.storage
 import CoreFoundation
 import CoreWLAN
 import MetricsKit
+import os
 
 @_silgen_name("CFRelease")
 private func CFReleaseShim(_ cf: CFTypeRef?)
@@ -330,6 +331,12 @@ private struct ANEIOReportMetrics {
 }
 
 private final class ANEIOReportSampler: @unchecked Sendable {
+    // `subscription` is the only manually managed handle here (raw pointer from a
+    // dlsym'd Create function; released in deinit). The CF-typed properties below
+    // are ARC-owned (takeRetainedValue / Create-rule results stored as CF types) —
+    // never CFRelease them manually. `sourceChannels` must stay retained for the
+    // sampler's lifetime because `selectedChannels` was created with nil callbacks
+    // and holds unretained element pointers into its channel array.
     private let subscription: UnsafeRawPointer
     private let channels: CFMutableDictionary
     private let metadata: [ANEIOReportChannelMetadata]
@@ -415,7 +422,7 @@ private final class ANEIOReportSampler: @unchecked Sendable {
         previousSample = rawSample()
     }
 
-    func sampleMetrics(durationMilliseconds: UInt64, count: Int) -> ANEIOReportMetrics {
+    func sampleMetrics(durationMilliseconds: UInt64, count: Int) async -> ANEIOReportMetrics {
         let requestedCount = max(1, min(count, 16))
         if previousSample == nil {
             previousSample = rawSample()
@@ -434,9 +441,12 @@ private final class ANEIOReportSampler: @unchecked Sendable {
             let targetTime = startedAt + .milliseconds(Int(targetMilliseconds))
             let now = DispatchTime.now()
             if targetTime > now {
-                let deltaNanoseconds = Int(targetTime.uptimeNanoseconds - now.uptimeNanoseconds)
+                // Suspend instead of usleep: this runs on the cooperative thread
+                // pool, and a blocking sleep would monopolize a pool thread for up
+                // to a full refresh interval.
+                let deltaNanoseconds = targetTime.uptimeNanoseconds - now.uptimeNanoseconds
                 if deltaNanoseconds > 0 {
-                    usleep(useconds_t(min(deltaNanoseconds / 1_000, Int(UInt32.max))))
+                    try? await Task.sleep(nanoseconds: deltaNanoseconds)
                 }
             }
 
@@ -1043,12 +1053,12 @@ final class SystemMonitor: ObservableObject {
         ProcessInfo.processInfo.systemUptime
     }
 
-    nonisolated func currentBootDurationSeconds() -> Double {
-        let uptime = ProcessInfo.processInfo.systemUptime
-        // Use a bounded heuristic for boot-to-desktop duration instead of raw uptime.
-        // This avoids presenting uptime as boot duration while keeping a stable value
-        // when no public boot-complete timestamp is available on macOS.
-        return min(max(uptime * 0.0028, 8.0), 45.0)
+    nonisolated func currentBootDurationSeconds() -> Double? {
+        MonitorProbe.bootToLoginDurationSeconds
+    }
+
+    nonisolated func systemBootDate() -> Date? {
+        MonitorProbe.systemBootDate
     }
 
     private func configureTimer() {
@@ -1154,7 +1164,8 @@ final class SystemMonitor: ObservableObject {
         let aneSampler = aneIOReportSampler
         lastNPUUsageProbeDate = now
         npuUsageProbeTask = Task.detached(priority: .utility) {
-            let aneMetrics = aneSampler?.sampleMetrics(durationMilliseconds: samplingDurationMilliseconds, count: 4)
+            let sampledMetrics = await aneSampler?.sampleMetrics(durationMilliseconds: samplingDurationMilliseconds, count: 4)
+            let aneMetrics = sampledMetrics
                 ?? ANEIOReportMetrics(activeTimePercent: 0, watts: 0, dataReadBytesPerSecond: 0, dataWriteBytesPerSecond: 0, dataMovementBytesPerSecond: 0)
             let nextNPU = MonitorProbe.collectNPUState(
                 previous: previousNPU,
@@ -2831,6 +2842,9 @@ extension SystemMonitor {
         guard let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault) else {
             return ([], [])
         }
+        // The client is a +1 raw pointer from a dlsym'd Create function — ARC does
+        // not manage it, and this runs on a recurring timer, so release on all paths.
+        defer { CFReleaseShim(unsafeBitCast(system, to: CFTypeRef.self)) }
 
         let matching = [
             "PrimaryUsagePage": 0xff00,
@@ -2864,9 +2878,11 @@ extension SystemMonitor {
     }
 
     func readDiskTemperatureCelsius() -> Double? {
-        guard let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault),
-              let services = IOHIDEventSystemClientCopyServices(system)?.takeRetainedValue()
-        else {
+        guard let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault) else {
+            return nil
+        }
+        defer { CFReleaseShim(unsafeBitCast(system, to: CFTypeRef.self)) }
+        guard let services = IOHIDEventSystemClientCopyServices(system)?.takeRetainedValue() else {
             return nil
         }
 
@@ -3903,16 +3919,40 @@ private extension Array {
 }
 
 extension Process {
-    static func runAndCapture(_ launchPath: String, _ arguments: [String]) throws -> Data {
+    enum CaptureError: Error {
+        case timedOut(command: String)
+    }
+
+    static func runAndCapture(_ launchPath: String, _ arguments: [String], timeout: TimeInterval = 15) throws -> Data {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        // stderr must not be an undrained Pipe: a child writing more than the 64 KB
+        // pipe buffer would block forever and permanently wedge a single-flight probe.
+        process.standardError = FileHandle.nullDevice
         try process.run()
+
+        let timedOut = OSAllocatedUnfairLock(initialState: false)
+        let killer = DispatchWorkItem {
+            timedOut.withLock { $0 = true }
+            process.terminate()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        killer.cancel()
+
+        if timedOut.withLock({ $0 }) {
+            throw CaptureError.timedOut(command: launchPath)
+        }
         return data
     }
 }
@@ -4615,6 +4655,40 @@ private enum MonitorProbe {
         let bytes = proc_listallpids(&buffer, Int32(buffer.count * MemoryLayout<pid_t>.size))
         guard bytes > 0 else { return [] }
         return buffer.filter { $0 > 0 }
+    }
+
+    static let systemBootDate: Date? = {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &bootTime, &size, nil, 0) == 0, bootTime.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(bootTime.tv_sec) + Double(bootTime.tv_usec) / 1_000_000)
+    }()
+
+    /// Boot-to-login duration: loginwindow's start timestamp minus kern.boottime.
+    /// nil when either timestamp is unavailable, so callers hide the stat instead
+    /// of showing a fabricated number. Both endpoints are fixed for the login
+    /// session, so this is computed once.
+    static let bootToLoginDurationSeconds: Double? = measureBootToLoginDuration()
+
+    private static func measureBootToLoginDuration() -> Double? {
+        guard let bootDate = systemBootDate else { return nil }
+        let boot = bootDate.timeIntervalSince1970
+
+        for pid in listPIDs() {
+            var nameBuffer = Array(repeating: CChar(0), count: Int(MAXPATHLEN))
+            let named = proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
+            guard named > 0, String(cString: nameBuffer) == "loginwindow" else { continue }
+
+            var bsdInfo = proc_bsdinfo()
+            let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, infoSize) == infoSize else { continue }
+            let started = Double(bsdInfo.pbi_start_tvsec) + Double(bsdInfo.pbi_start_tvusec) / 1_000_000
+            let duration = started - boot
+            guard duration > 0, duration < 3600 else { return nil }
+            return duration
+        }
+        return nil
     }
 
     static func extractFirstMatch(in text: String, pattern: String) -> String? {

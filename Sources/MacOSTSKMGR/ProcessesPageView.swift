@@ -162,8 +162,15 @@ struct ProcessesPageView: View {
     }
 
     private var networkBusyLabel: String {
-        let total = monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
-        return total == 0 ? "0%" : "1%"
+        let totalBytesPerSecond = monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
+        let totalLinkBitsPerSecond = monitor.networks.reduce(UInt64(0)) { $0 + $1.linkSpeedBitsPerSecond }
+        guard totalLinkBitsPerSecond > 0 else {
+            // Without a known link speed there is no honest percentage; show the
+            // real throughput instead of an invented value.
+            return DisplayFormat.throughput(totalBytesPerSecond)
+        }
+        let percent = min(Double(totalBytesPerSecond) * 8 / Double(totalLinkBitsPerSecond) * 100, 100)
+        return DisplayFormat.percent(percent)
     }
 
     private func sectionHeader(_ title: String, width: CGFloat) -> some View {
@@ -369,7 +376,10 @@ struct ProcessesPageView: View {
         case .name:
             result = lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         case .status:
-            result = true
+            // The status cell is currently always empty (like Windows, which only
+            // shows badges such as "Suspended"), so order by name to keep the sort
+            // deterministic instead of arbitrary.
+            result = lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         case .cpu:
             result = lhs.cpuPercent < rhs.cpuPercent
         case .memory:

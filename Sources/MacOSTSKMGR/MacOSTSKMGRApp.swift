@@ -26,6 +26,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Restore the window after "Hide when minimized" sent the app out of view.
+        NSApp.unhide(nil)
+        if !flag {
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
     private func configure(window: NSWindow) {
         window.styleMask.insert(.fullSizeContentView)
         window.titleVisibility = .hidden

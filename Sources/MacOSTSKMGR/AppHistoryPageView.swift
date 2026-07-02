@@ -29,7 +29,7 @@ struct AppHistoryPageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(language.text("自 2026/6/10 以来，当前用户帐户的资源使用情况。", "Resource usage for the current account since 2026/6/10."))
+                Text(usageSinceText)
                     .font(.system(size: 14))
                     .foregroundStyle(AppTheme.primaryText(colorScheme))
                 Button(language.text("删除使用情况历史记录", "Delete usage history")) {
@@ -61,6 +61,21 @@ struct AppHistoryPageView: View {
                 }
             )
         }
+    }
+
+    private var usageSinceText: String {
+        guard let bootDate = monitor.systemBootDate() else {
+            return language.text("当前用户帐户的资源使用情况。", "Resource usage for the current account.")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language.isChinese ? "zh_CN" : "en_US")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        let dateText = formatter.string(from: bootDate)
+        return language.text(
+            "自 \(dateText) 以来，当前用户帐户的资源使用情况。",
+            "Resource usage for the current account since \(dateText)."
+        )
     }
 
     private var columns: [MetricColumn<AppHistoryRowData>] {

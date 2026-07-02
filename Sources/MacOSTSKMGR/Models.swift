@@ -257,6 +257,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
             case "Incorrect password.": return "密码不正确。"
             case "Task execution failed.": return "任务执行失败。"
             case "Unable to open application.": return "无法打开应用程序。"
+            case "Unable to change the process priority.": return "无法更改进程优先级。"
             default:
                 if value.hasPrefix("Unable to start task: ") {
                     return value.replacingOccurrences(of: "Unable to start task:", with: "无法启动任务：")

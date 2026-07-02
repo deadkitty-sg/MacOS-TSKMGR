@@ -40,8 +40,10 @@ struct RootWindowView: View {
     @State private var temperatureUnitParentHovered = false
     @State private var temperatureUnitSubmenuHovered = false
     @State private var alwaysOnTop = false
-    @State private var hideWhenMinimized = false
-    @State private var useSmallValues = false
+    @AppStorage("pref.hideWhenMinimized") private var hideWhenMinimized = false
+    // Empty string = follow the system locale; otherwise an AppLanguage raw value
+    // the user picked manually, which must survive relaunches and locale changes.
+    @AppStorage("pref.languageOverride") private var languageOverride = ""
     @State private var collapsedSections: Set<String> = []
     @State private var processMemoryDisplayMode: ProcessResourceDisplayMode = .value
     @State private var processDiskDisplayMode: ProcessResourceDisplayMode = .value
@@ -268,6 +270,9 @@ struct RootWindowView: View {
             monitor.temperatureUnit = newValue
         }
         .onAppear {
+            if let overridden = AppLanguage(rawValue: languageOverride) {
+                language = overridden
+            }
             monitor.language = language
             monitor.temperatureUnit = temperatureUnit
             monitor.start()
@@ -276,6 +281,13 @@ struct RootWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
             applySystemPresentationPreferences()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { notification in
+            guard hideWhenMinimized, let window = notification.object as? NSWindow else { return }
+            // Deminiaturize before hiding so a Dock-icon click restores a normal
+            // window instead of leaving a hidden, still-minimized one behind.
+            window.deminiaturize(nil)
+            NSApp.hide(nil)
         }
         .environment(\.appLanguage, language)
         .environment(\.temperatureUnit, temperatureUnit)
@@ -287,6 +299,8 @@ struct RootWindowView: View {
     }
 
     private func applySystemPresentationPreferences() {
+        // A manual language pick always wins over the system locale.
+        guard languageOverride.isEmpty else { return }
         let systemLanguage = Self.defaultLanguageFromSystem()
         if language != systemLanguage {
             language = systemLanguage
@@ -387,10 +401,6 @@ struct RootWindowView: View {
                     alwaysOnTop.toggle()
                     activeMenu = nil
                 }
-                checkableMenuItem(language.text("使用小值(U)", "Use small values(U)"), checked: useSmallValues) {
-                    useSmallValues.toggle()
-                    activeMenu = nil
-                }
                 checkableMenuItem(language.text("最小化时隐藏(H)", "Hide when minimized(H)"), checked: hideWhenMinimized) {
                     hideWhenMinimized.toggle()
                     activeMenu = nil
@@ -469,6 +479,7 @@ struct RootWindowView: View {
         VStack(spacing: 0) {
             Button {
                 language = .chinese
+                languageOverride = AppLanguage.chinese.rawValue
                 showLanguageSubmenu = false
                 activeMenu = nil
             } label: {
@@ -487,6 +498,7 @@ struct RootWindowView: View {
 
             Button {
                 language = .english
+                languageOverride = AppLanguage.english.rawValue
                 showLanguageSubmenu = false
                 activeMenu = nil
             } label: {
@@ -912,10 +924,28 @@ struct RootWindowView: View {
 
     private func setProcessPriority(pid: Int32, preset: ProcessPriorityPreset) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/renice")
-        process.arguments = ["-n", "\(preset.niceValue)", "-p", "\(pid)"]
-        try? process.run()
-        process.waitUntilExit()
+        if preset.niceValue < 0 {
+            // Raising priority (negative nice) requires root, so prompt for admin
+            // rights instead of silently failing. Only integers are interpolated,
+            // so the embedded shell command cannot be escaped.
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = [
+                "-e",
+                "do shell script \"/usr/bin/renice -n \(preset.niceValue) -p \(pid)\" with administrator privileges"
+            ]
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/renice")
+            process.arguments = ["-n", "\(preset.niceValue)", "-p", "\(pid)"]
+        }
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                taskActionErrorMessage = "Unable to change the process priority."
+            }
+        } catch {
+            taskActionErrorMessage = "Unable to change the process priority."
+        }
         monitor.refreshNow()
     }
 

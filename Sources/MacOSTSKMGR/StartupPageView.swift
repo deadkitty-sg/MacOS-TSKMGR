@@ -10,9 +10,11 @@ struct StartupPageView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Spacer()
-                Text(language.text("本次系统启动时间: ", "Startup time: ") + "\(String(format: "%.1f", monitor.currentBootDurationSeconds())) " + language.text("秒", "s"))
-                    .font(.system(size: 14))
-                    .foregroundStyle(AppTheme.primaryText(colorScheme))
+                if let bootDuration = monitor.currentBootDurationSeconds() {
+                    Text(language.text("本次系统启动时间: ", "Startup time: ") + "\(String(format: "%.1f", bootDuration)) " + language.text("秒", "s"))
+                        .font(.system(size: 14))
+                        .foregroundStyle(AppTheme.primaryText(colorScheme))
+                }
             }
             .padding(.top, 18)
             .padding(.leading, 8)
@@ -138,14 +140,23 @@ struct StartupPageView: View {
     }
 
     private func toggleSystemStartupItem(path: String, label: String, enable: Bool) {
-        let command = enable ? "launchctl enable system/\(label)" : "launchctl disable system/\(label)"
-        let plistFlag = enable ? "false" : "true"
+        // The label lands on the shell command line, so restrict it to reverse-DNS
+        // characters; the path is passed through AppleScript's `quoted form of`.
+        // Never interpolate either into the script source (shell-injection risk).
+        let allowedLabelCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        guard !label.isEmpty, label.unicodeScalars.allSatisfy({ allowedLabelCharacters.contains($0) }) else { return }
         let script = """
-        do shell script "\(command); /usr/bin/plutil -replace Disabled -bool \(plistFlag) '\(path)'" with administrator privileges
+        on run argv
+            set verb to item 1 of argv
+            set theLabel to item 2 of argv
+            set plistFlag to item 3 of argv
+            set thePath to item 4 of argv
+            do shell script "/bin/launchctl " & verb & " system/" & theLabel & "; /usr/bin/plutil -replace Disabled -bool " & plistFlag & " " & quoted form of thePath with administrator privileges
+        end run
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.arguments = ["-e", script, enable ? "enable" : "disable", label, enable ? "false" : "true", path]
         try? process.run()
         process.waitUntilExit()
     }
