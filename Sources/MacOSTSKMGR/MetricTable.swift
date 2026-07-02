@@ -82,7 +82,7 @@ struct MetricTableNameCell: View {
 /// Services, Startup and App-history pages. (Processes and Users keep bespoke
 /// layouts because they add collapsible sections, summary rows and live
 /// metric-value headers.)
-struct MetricTable<Row: Identifiable, Menu: View>: View {
+struct MetricTable<Row: Identifiable & Equatable, Menu: View>: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private let rows: [Row]
@@ -101,6 +101,9 @@ struct MetricTable<Row: Identifiable, Menu: View>: View {
 
     @State private var sortColumnID: String
     @State private var ascending: Bool
+    // Sort output is cached and recomputed only when the rows or sort state
+    // change, not on every body evaluation.
+    @State private var displayedRows: [Row] = []
 
     init(
         rows: [Row],
@@ -140,11 +143,12 @@ struct MetricTable<Row: Identifiable, Menu: View>: View {
         columns.reduce(0) { $0 + $1.baseWidth }
     }
 
-    private var sortedRows: [Row] {
+    private func resortRows() {
         guard let column = columns.first(where: { $0.id == sortColumnID }), column.sortable else {
-            return rows
+            displayedRows = rows
+            return
         }
-        return rows.sorted { lhs, rhs in
+        displayedRows = rows.sorted { lhs, rhs in
             let result = column.comparator(lhs, rhs)
             return ascending ? result : !result
         }
@@ -161,7 +165,7 @@ struct MetricTable<Row: Identifiable, Menu: View>: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(sortedRows.enumerated()), id: \.element.id) { index, row in
+                        ForEach(Array(displayedRows.enumerated()), id: \.element.id) { index, row in
                             rowView(row, index: index, scale: scale)
                         }
                     }
@@ -172,6 +176,12 @@ struct MetricTable<Row: Identifiable, Menu: View>: View {
             .padding(.top, topPadding)
             .padding(.leading, insetLeading)
             .padding(.trailing, insetTrailing)
+        }
+        .onAppear {
+            resortRows()
+        }
+        .onChange(of: rows) { _, _ in
+            resortRows()
         }
     }
 
@@ -197,6 +207,7 @@ struct MetricTable<Row: Identifiable, Menu: View>: View {
                 sortColumnID = column.id
                 ascending = column.defaultAscending
             }
+            resortRows()
         } label: {
             HStack(spacing: 4) {
                 Text(column.title)

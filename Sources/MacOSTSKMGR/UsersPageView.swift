@@ -42,11 +42,14 @@ struct UsersPageView: View {
     @State private var expanded = true
     @State private var sortKey: UsersSortKey = .memory
     @State private var ascending = false
+    // Sorted output is cached and recomputed only when its inputs change, not on
+    // every body evaluation (the monitor publishes ~every tick).
+    @State private var displayedRows: [ProcessRowData] = []
 
     var body: some View {
         GeometryReader { proxy in
             let widths = scaledWidths(for: proxy.size.width)
-            let rows = sortedRows
+            let rows = displayedRows
             let userName = monitor.currentUserSection?.userName ?? NSFullUserName()
             let totalCPU = rows.reduce(0.0) { $0 + $1.cpuPercent }
             let totalMemory = rows.reduce(UInt64(0)) { $0 + $1.memoryBytes }
@@ -69,7 +72,7 @@ struct UsersPageView: View {
                 }
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         Button {
                             expanded.toggle()
                         } label: {
@@ -127,7 +130,14 @@ struct UsersPageView: View {
                                     selectedPID = row.pid
                                 }
                                 .contextMenu {
-                                    processContextMenu(for: row)
+                                    ProcessContextMenu(
+                                        row: row,
+                                        selectedPID: $selectedPID,
+                                        memoryDisplayMode: $memoryDisplayMode,
+                                        diskDisplayMode: $diskDisplayMode,
+                                        networkDisplayMode: $networkDisplayMode,
+                                        actions: rowActions
+                                    )
                                 }
                             }
                         }
@@ -140,16 +150,24 @@ struct UsersPageView: View {
             .padding(.leading, UsersColumnLayout.insetLeading)
             .padding(.trailing, UsersColumnLayout.insetTrailing)
         }
+        .onAppear {
+            recomputeDisplayedRows()
+        }
+        .onChange(of: monitor.currentUserAppRows) { _, _ in
+            recomputeDisplayedRows()
+        }
     }
 
-    private var sortedRows: [ProcessRowData] {
-        monitor.currentUserAppRows.sorted { lhs, rhs in
+    private func recomputeDisplayedRows() {
+        displayedRows = monitor.currentUserAppRows.sorted { lhs, rhs in
             let result: Bool
             switch sortKey {
             case .user:
                 result = lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             case .status:
-                result = true
+                // The status cell is always empty; order by name so the sort is
+                // deterministic instead of arbitrary.
+                result = lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             case .cpu:
                 result = lhs.cpuPercent < rhs.cpuPercent
             case .memory:
@@ -247,158 +265,57 @@ struct UsersPageView: View {
             sortKey = key
             ascending = (key == .user || key == .status)
         }
+        recomputeDisplayedRows()
     }
 
-    private func processContextMenu(for row: ProcessRowData) -> some View {
-        Group {
-            if shouldShowRestartInsteadOfTerminate(row) {
-                Button(language.text("重新启动", "Restart")) {
-                    selectedPID = row.pid
-                    onRestartTask(row)
-                }
-            } else if canTerminate(row) {
-                Button(language.text("结束任务", "End task")) {
-                    selectedPID = row.pid
-                    onEndTask(row.pid)
-                }
-            } else if canRestart(row) {
-                Button(language.text("重新启动", "Restart")) {
-                    selectedPID = row.pid
-                    onRestartTask(row)
-                }
-            }
-
-            Menu(language.text("资源值", "Resource values")) {
-                Menu(language.text("内存", "Memory")) {
-                    Button(language.text("百分比", "Percent")) {
-                        memoryDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        memoryDisplayMode = .value
-                    }
-                }
-                Menu(language.text("磁盘", "Disk")) {
-                    Button(language.text("百分比", "Percent")) {
-                        diskDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        diskDisplayMode = .value
-                    }
-                }
-                Menu(language.text("网络", "Network")) {
-                    Button(language.text("百分比", "Percent")) {
-                        networkDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        networkDisplayMode = .value
-                    }
-                }
-            }
-
-            Button(language.text("转到详细信息", "Go to details")) {
-                selectedPID = row.pid
-                onOpenDetailsTab(row.pid)
-            }
-
-            Button(language.text("打开文件所在的位置", "Open file location")) {
-                onRevealInFinder(row.path)
-            }
-            .disabled(row.path.isEmpty)
-
-            Button(language.text("在线搜索", "Search online")) {
-                onSearchWeb(row.name)
-            }
-
-            Button(language.text("属性", "Properties")) {
-                onShowProperties(row)
-            }
-
-            Divider()
-
-            Button(language.text("复制", "Copy")) {
-                onCopyProcessDetails(row)
-            }
-        }
+    private var rowActions: ProcessRowActions {
+        ProcessRowActions(
+            onEndTask: onEndTask,
+            onRestartTask: onRestartTask,
+            onRevealInFinder: onRevealInFinder,
+            onSearchWeb: onSearchWeb,
+            onShowProperties: onShowProperties,
+            onCopyProcessDetails: onCopyProcessDetails,
+            onOpenDetailsTab: onOpenDetailsTab
+        )
     }
 
-    private func canTerminate(_ row: ProcessRowData) -> Bool {
-        row.pid > 1 && row.pid != Int32(ProcessInfo.processInfo.processIdentifier)
-    }
-
-    private func canRestart(_ row: ProcessRowData) -> Bool {
-        !canTerminate(row) && row.isApp && !row.path.isEmpty
-    }
-
-    private func shouldShowRestartInsteadOfTerminate(_ row: ProcessRowData) -> Bool {
-        let lowerName = row.name.lowercased()
-        let lowerPath = row.path.lowercased()
-        return lowerName == "finder" || lowerName == "访达" || lowerPath.contains("/system/library/coreservices/finder.app")
+    private var totalNetworkBytesPerSecond: UInt64 {
+        monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
     }
 
     private func memoryText(for row: ProcessRowData) -> String {
-        switch memoryDisplayMode {
-        case .value:
-            return DisplayFormat.memory(row.memoryBytes)
-        case .percent:
-            guard monitor.memory.totalBytes > 0 else { return "0%" }
-            let percent = Double(row.memoryBytes) / Double(monitor.memory.totalBytes) * 100
-            return DisplayFormat.percentWithPrecision(percent, digits: 1)
-        }
+        ProcessRowFormatter.memoryText(bytes: row.memoryBytes, mode: memoryDisplayMode, totalMemoryBytes: monitor.memory.totalBytes)
     }
 
     private func diskText(for row: ProcessRowData) -> String {
-        switch diskDisplayMode {
-        case .value:
-            return DisplayFormat.throughput(row.diskBytesPerSecond)
-        case .percent:
-            let percent = min(Double(row.diskBytesPerSecond) / 4_000_000 * 100, 100)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.diskText(bytesPerSecond: row.diskBytesPerSecond, mode: diskDisplayMode)
     }
 
     private func networkText(for row: ProcessRowData) -> String {
-        switch networkDisplayMode {
-        case .value:
-            return row.networkText
-        case .percent:
-            let total = monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
-            guard total > 0 else { return "0%" }
-            let percent = min(Double(row.networkBytesPerSecond) / Double(total) * 100, 100)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.networkText(
+            bytesPerSecond: row.networkBytesPerSecond,
+            valueText: row.networkText,
+            mode: networkDisplayMode,
+            totalNetworkBytesPerSecond: totalNetworkBytesPerSecond
+        )
     }
 
     private func summaryMemoryText(_ totalMemory: UInt64) -> String {
-        switch memoryDisplayMode {
-        case .value:
-            return DisplayFormat.memory(totalMemory)
-        case .percent:
-            guard monitor.memory.totalBytes > 0 else { return "0%" }
-            let percent = Double(totalMemory) / Double(monitor.memory.totalBytes) * 100
-            return DisplayFormat.percentWithPrecision(percent, digits: 1)
-        }
+        ProcessRowFormatter.memoryText(bytes: totalMemory, mode: memoryDisplayMode, totalMemoryBytes: monitor.memory.totalBytes)
     }
 
     private func summaryDiskText(_ totalDisk: UInt64) -> String {
-        switch diskDisplayMode {
-        case .value:
-            return DisplayFormat.throughput(totalDisk)
-        case .percent:
-            let percent = min(Double(totalDisk) / 4_000_000 * 100, 100)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.diskText(bytesPerSecond: totalDisk, mode: diskDisplayMode)
     }
 
     private func summaryNetworkText(_ totalNetwork: UInt64) -> String {
-        switch networkDisplayMode {
-        case .value:
-            return totalNetwork == 0 ? "0 Mbps" : DisplayFormat.networkRate(totalNetwork)
-        case .percent:
-            let total = monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
-            guard total > 0 else { return "0%" }
-            let percent = min(Double(totalNetwork) / Double(total) * 100, 100)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.networkText(
+            bytesPerSecond: totalNetwork,
+            valueText: totalNetwork == 0 ? "0 Mbps" : DisplayFormat.networkRate(totalNetwork),
+            mode: networkDisplayMode,
+            totalNetworkBytesPerSecond: totalNetworkBytesPerSecond
+        )
     }
 }
 

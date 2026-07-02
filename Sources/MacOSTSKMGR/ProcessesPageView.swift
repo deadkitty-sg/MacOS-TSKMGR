@@ -84,6 +84,9 @@ struct ProcessesPageView: View {
     @State private var ascending = false
     @State private var hoveredSortKey: ProcessSortKey?
     @State private var searchText = ""
+    // Filter + sort output is cached and recomputed only when its inputs change,
+    // not on every body evaluation (the monitor publishes ~every tick).
+    @State private var displayedSections: [ProcessSectionData] = []
 
     var body: some View {
         GeometryReader { proxy in
@@ -98,8 +101,8 @@ struct ProcessesPageView: View {
                     .frame(width: widths.total, alignment: .leading)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(sortedSections) { section in
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(displayedSections) { section in
                             sectionHeader(section.title, width: widths.total)
 
                             if !collapsedSections.contains(section.title) {
@@ -117,11 +120,20 @@ struct ProcessesPageView: View {
             .padding(.leading, ProcessColumnLayout.pageInsetLeading)
             .padding(.trailing, ProcessColumnLayout.pageInsetTrailing)
         }
+        .onAppear {
+            recomputeDisplayedSections()
+        }
+        .onChange(of: monitor.processSections) { _, _ in
+            recomputeDisplayedSections()
+        }
+        .onChange(of: searchText) { _, _ in
+            recomputeDisplayedSections()
+        }
     }
 
-    private var sortedSections: [ProcessSectionData] {
+    private func recomputeDisplayedSections() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return monitor.processSections.map { section in
+        displayedSections = monitor.processSections.map { section in
             var rows = section.rows
             if !query.isEmpty {
                 rows = rows.filter { row in
@@ -278,8 +290,27 @@ struct ProcessesPageView: View {
             selectedPID = row.pid
         }
         .contextMenu {
-            processContextMenu(for: row)
+            ProcessContextMenu(
+                row: row,
+                selectedPID: $selectedPID,
+                memoryDisplayMode: $memoryDisplayMode,
+                diskDisplayMode: $diskDisplayMode,
+                networkDisplayMode: $networkDisplayMode,
+                actions: rowActions
+            )
         }
+    }
+
+    private var rowActions: ProcessRowActions {
+        ProcessRowActions(
+            onEndTask: onEndTask,
+            onRestartTask: onRestartTask,
+            onRevealInFinder: onRevealInFinder,
+            onSearchWeb: onSearchWeb,
+            onShowProperties: onShowProperties,
+            onCopyProcessDetails: onCopyProcessDetails,
+            onOpenDetailsTab: onOpenDetailsTab
+        )
     }
 
     private func processRowBackground(_ row: ProcessRowData, rowIndex: Int) -> Color {
@@ -351,6 +382,7 @@ struct ProcessesPageView: View {
             sortKey = key
             ascending = (key == .name || key == .status || key == .power || key == .trend)
         }
+        recomputeDisplayedSections()
     }
 
     private func toggleSection(_ title: String) {
@@ -396,124 +428,25 @@ struct ProcessesPageView: View {
         return ascending ? result : !result
     }
 
-    private func processContextMenu(for row: ProcessRowData) -> some View {
-        Group {
-            if shouldShowRestartInsteadOfTerminate(row) {
-                Button(language.text("重新启动", "Restart")) {
-                    selectedPID = row.pid
-                    onRestartTask(row)
-                }
-            } else if canTerminate(row) {
-                Button(language.text("结束任务", "End task")) {
-                    selectedPID = row.pid
-                    onEndTask(row.pid)
-                }
-            } else if canRestart(row) {
-                Button(language.text("重新启动", "Restart")) {
-                    selectedPID = row.pid
-                    onRestartTask(row)
-                }
-            }
-
-            Menu(language.text("资源值", "Resource values")) {
-                Menu(language.text("内存", "Memory")) {
-                    Button(language.text("百分比", "Percent")) {
-                        memoryDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        memoryDisplayMode = .value
-                    }
-                }
-                Menu(language.text("磁盘", "Disk")) {
-                    Button(language.text("百分比", "Percent")) {
-                        diskDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        diskDisplayMode = .value
-                    }
-                }
-                Menu(language.text("网络", "Network")) {
-                    Button(language.text("百分比", "Percent")) {
-                        networkDisplayMode = .percent
-                    }
-                    Button(language.text("值", "Values")) {
-                        networkDisplayMode = .value
-                    }
-                }
-            }
-
-            Button(language.text("转到详细信息", "Go to details")) {
-                selectedPID = row.pid
-                onOpenDetailsTab(row.pid)
-            }
-
-            Button(language.text("打开文件所在的位置", "Open file location")) {
-                onRevealInFinder(row.path)
-            }
-            .disabled(row.path.isEmpty)
-
-            Button(language.text("在线搜索", "Search online")) {
-                onSearchWeb(row.name)
-            }
-
-            Button(language.text("属性", "Properties")) {
-                onShowProperties(row)
-            }
-
-            Divider()
-
-            Button(language.text("复制", "Copy")) {
-                onCopyProcessDetails(row)
-            }
-        }
-    }
-
-    private func canTerminate(_ row: ProcessRowData) -> Bool {
-        row.pid > 1 && row.pid != Int32(ProcessInfo.processInfo.processIdentifier)
-    }
-
-    private func canRestart(_ row: ProcessRowData) -> Bool {
-        !canTerminate(row) && row.isApp && !row.path.isEmpty
-    }
-
-    private func shouldShowRestartInsteadOfTerminate(_ row: ProcessRowData) -> Bool {
-        let lowerName = row.name.lowercased()
-        let lowerPath = row.path.lowercased()
-        return lowerName == "finder" || lowerName == "访达" || lowerPath.contains("/system/library/coreservices/finder.app")
+    private var totalNetworkBytesPerSecond: UInt64 {
+        monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
     }
 
     private func memoryText(for row: ProcessRowData) -> String {
-        switch memoryDisplayMode {
-        case .value:
-            return DisplayFormat.memory(row.memoryBytes)
-        case .percent:
-            guard monitor.memory.totalBytes > 0 else { return "0%" }
-            let percent = Double(row.memoryBytes) / Double(monitor.memory.totalBytes) * 100
-            return DisplayFormat.percentWithPrecision(percent, digits: 1)
-        }
+        ProcessRowFormatter.memoryText(bytes: row.memoryBytes, mode: memoryDisplayMode, totalMemoryBytes: monitor.memory.totalBytes)
     }
 
     private func diskText(for row: ProcessRowData) -> String {
-        switch diskDisplayMode {
-        case .value:
-            return DisplayFormat.throughput(row.diskBytesPerSecond)
-        case .percent:
-            let maxValue = max(monitor.disks.map(\.activityPercent).max() ?? 0, 100)
-            let percent = min(Double(row.diskBytesPerSecond) / 4_000_000 * 100, maxValue)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.diskText(bytesPerSecond: row.diskBytesPerSecond, mode: diskDisplayMode)
     }
 
     private func networkText(for row: ProcessRowData) -> String {
-        switch networkDisplayMode {
-        case .value:
-            return row.networkText
-        case .percent:
-            let total = monitor.networks.reduce(UInt64(0)) { $0 + $1.sendBytesPerSecond + $1.receiveBytesPerSecond }
-            guard total > 0 else { return "0%" }
-            let percent = min(Double(row.networkBytesPerSecond) / Double(total) * 100, 100)
-            return DisplayFormat.percentWithPrecision(percent, digits: 0)
-        }
+        ProcessRowFormatter.networkText(
+            bytesPerSecond: row.networkBytesPerSecond,
+            valueText: row.networkText,
+            mode: networkDisplayMode,
+            totalNetworkBytesPerSecond: totalNetworkBytesPerSecond
+        )
     }
 }
 

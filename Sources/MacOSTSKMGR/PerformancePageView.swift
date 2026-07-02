@@ -799,50 +799,31 @@ struct PerformancePageView: View {
     private func gpuGraphContainer(_ detail: PerformanceDetailViewData, chartHeights: PerformanceChartHeights) -> some View {
         Group {
             if gpuGraphLayoutMode == .singleEngine {
-                VStack(alignment: .leading, spacing: 4) {
-                    gpuHeader(title: leftGPUSelection.title(in: language), valueText: gpuValueText(for: leftGPUSelection, detail: detail), target: .left)
-                    GridChart(values: gpuValues(for: leftGPUSelection, detail: detail), color: detail.accent, filled: true)
-                        .frame(height: chartHeights.gpuSingle)
-                        .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                }
-                .overlay(alignment: .topLeading) {
-                    if openGPUMenu == .left {
-                        gpuMenu(target: .left)
-                            .offset(x: 0, y: 22)
-                    }
-                }
+                gpuPane(target: .left, height: chartHeights.gpuSingle, detail: detail)
             } else {
                 HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        gpuHeader(title: leftGPUSelection.title(in: language), valueText: gpuValueText(for: leftGPUSelection, detail: detail), target: .left)
-                        GridChart(values: gpuValues(for: leftGPUSelection, detail: detail), color: detail.accent, filled: true)
-                            .frame(height: chartHeights.gpuDual)
-                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if openGPUMenu == .left {
-                            gpuMenu(target: .left)
-                                .offset(x: 0, y: 22)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        gpuHeader(title: rightGPUSelection.title(in: language), valueText: gpuValueText(for: rightGPUSelection, detail: detail), target: .right)
-                        GridChart(values: gpuValues(for: rightGPUSelection, detail: detail), color: detail.accent, filled: true)
-                            .frame(height: chartHeights.gpuDual)
-                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if openGPUMenu == .right {
-                            gpuMenu(target: .right)
-                                .offset(x: 0, y: 22)
-                        }
-                    }
+                    gpuPane(target: .left, height: chartHeights.gpuDual, detail: detail)
+                    gpuPane(target: .right, height: chartHeights.gpuDual, detail: detail)
                 }
             }
         }
         .contentShape(Rectangle())
-        .id("gpu-detail-\(selectedPerf.id)-\(gpuGraphLayoutMode == .singleEngine ? "single" : "multi")-\(leftGPUSelection.rawValue)-\(rightGPUSelection.rawValue)")
+    }
+
+    private func gpuPane(target: GPUGraphMenuTarget, height: CGFloat, detail: PerformanceDetailViewData) -> some View {
+        let selection = target == .left ? leftGPUSelection : rightGPUSelection
+        return VStack(alignment: .leading, spacing: 4) {
+            gpuHeader(title: selection.title(in: language), valueText: gpuValueText(for: selection, detail: detail), target: target)
+            GridChart(values: gpuValues(for: selection, detail: detail), color: detail.accent, filled: true)
+                .frame(height: height)
+                .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+        }
+        .overlay(alignment: .topLeading) {
+            if openGPUMenu == target {
+                gpuMenu(target: target)
+                    .offset(x: 0, y: 22)
+            }
+        }
     }
 
     private func gpuValues(for kind: GPUGraphKind, detail: PerformanceDetailViewData) -> [Double] {
@@ -926,7 +907,6 @@ struct PerformancePageView: View {
             }
         }
         .contentShape(Rectangle())
-        .id("cpu-graph-\(cpuGraphMode == .overallUtilization ? "overall" : "logical")-\(showsKernelTime ? "kernel" : "user")")
     }
 
     private func detailSummaryChartContainer(_ detail: PerformanceDetailViewData) -> some View {
@@ -938,7 +918,6 @@ struct PerformancePageView: View {
             }
         }
         .contentShape(Rectangle())
-        .id("detail-summary-\(selectedPerf.id)-\(showsKernelTime ? "kernel" : "user")")
     }
 
     private func cpuSingleSummaryChart(_ detail: PerformanceDetailViewData, idealHeight: CGFloat? = nil) -> some View {
@@ -997,7 +976,6 @@ struct PerformancePageView: View {
             .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
             .frame(height: chartHeights.networkMain)
             .contentShape(Rectangle())
-            .id("network-detail-\(selectedPerf.id)")
         )
     }
 
@@ -1008,63 +986,36 @@ struct PerformancePageView: View {
             return AnyView(EmptyView())
         }
 
-        let leftKind = leftNPUGraphKind
-        let rightKind = rightNPUGraphKind
-        let values = npuValues(for: npu, kind: leftKind)
-        let ceiling = npuChartCeiling(for: npu, kind: leftKind)
-        let valueText = npuValueText(for: npu, kind: leftKind)
-
         return AnyView(
         Group {
             if npuGraphLayoutMode == .singleEngine {
-                VStack(alignment: .leading, spacing: 4) {
-                    npuHeader(valueText: valueText, graphKind: leftKind, target: .left)
-
-                    GridChart(values: values, color: detail.accent, filled: true, ceiling: ceiling)
-                        .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                        .frame(height: chartHeights.npuMain)
-                }
-                .overlay(alignment: .topLeading) {
-                    if openNPUMenu == .left {
-                        npuMenu(target: .left)
-                            .offset(x: 0, y: 22)
-                    }
-                }
+                npuPane(npu: npu, target: .left, height: chartHeights.npuMain, detail: detail)
             } else {
                 HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        npuHeader(valueText: npuValueText(for: npu, kind: leftKind), graphKind: leftKind, target: .left)
-
-                        GridChart(values: npuValues(for: npu, kind: leftKind), color: detail.accent, filled: true, ceiling: npuChartCeiling(for: npu, kind: leftKind))
-                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                            .frame(height: chartHeights.gpuDual)
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if openNPUMenu == .left {
-                            npuMenu(target: .left)
-                                .offset(x: 0, y: 22)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        npuHeader(valueText: npuValueText(for: npu, kind: rightKind), graphKind: rightKind, target: .right)
-
-                        GridChart(values: npuValues(for: npu, kind: rightKind), color: detail.accent, filled: true, ceiling: npuChartCeiling(for: npu, kind: rightKind))
-                            .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
-                            .frame(height: chartHeights.gpuDual)
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if openNPUMenu == .right {
-                            npuMenu(target: .right)
-                                .offset(x: 0, y: 22)
-                        }
-                    }
+                    npuPane(npu: npu, target: .left, height: chartHeights.gpuDual, detail: detail)
+                    npuPane(npu: npu, target: .right, height: chartHeights.gpuDual, detail: detail)
                 }
             }
         }
         .contentShape(Rectangle())
-        .id("npu-detail-\(selectedPerf.id)-\(npuGraphLayoutMode == .singleEngine ? "single" : "multi")-\(leftNPUGraphKind.rawValue)-\(rightNPUGraphKind.rawValue)")
         )
+    }
+
+    private func npuPane(npu: NPUState, target: NPUGraphMenuTarget, height: CGFloat, detail: PerformanceDetailViewData) -> some View {
+        let kind = target == .left ? leftNPUGraphKind : rightNPUGraphKind
+        return VStack(alignment: .leading, spacing: 4) {
+            npuHeader(valueText: npuValueText(for: npu, kind: kind), graphKind: kind, target: target)
+
+            GridChart(values: npuValues(for: npu, kind: kind), color: detail.accent, filled: true, ceiling: npuChartCeiling(for: npu, kind: kind))
+                .overlay(Rectangle().stroke(detail.accent, lineWidth: 1))
+                .frame(height: height)
+        }
+        .overlay(alignment: .topLeading) {
+            if openNPUMenu == target {
+                npuMenu(target: target)
+                    .offset(x: 0, y: 22)
+            }
+        }
     }
 
     private func npuHeader(valueText: String, graphKind: NPUGraphKind, target: NPUGraphMenuTarget) -> some View {
@@ -1176,7 +1127,6 @@ struct PerformancePageView: View {
             }()
         )
         .contentShape(Rectangle())
-        .id("detail-chart-\(selectedPerf.id)")
     }
 
     private func detailContextMenu() -> some View {

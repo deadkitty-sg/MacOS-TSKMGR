@@ -873,25 +873,11 @@ struct RootWindowView: View {
     }
 
     private func searchWeb(_ query: String) {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        if let url = URL(string: "https://www.google.com/search?q=\(encoded)") {
-            NSWorkspace.shared.open(url)
-        }
+        FinderInfo.searchWeb(query: query)
     }
 
     private func showProcessProperties(_ row: ProcessRowData) {
-        guard !row.path.isEmpty else { return }
-        let script = """
-        tell application "Finder"
-            activate
-            set targetItem to POSIX file "\(row.path)" as alias
-            open information window of targetItem
-        end tell
-        """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try? process.run()
+        FinderInfo.showProperties(path: row.path)
     }
 
     private func copyProcessDetails(_ row: ProcessRowData) {

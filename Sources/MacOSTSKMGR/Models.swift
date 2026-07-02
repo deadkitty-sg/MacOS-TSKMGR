@@ -498,7 +498,7 @@ enum NPUGraphKind: String, CaseIterable, Identifiable {
     }
 }
 
-struct ProcessRowData: Identifiable {
+struct ProcessRowData: Identifiable, Equatable {
     let pid: Int32
     let name: String
     let icon: NSImage?
@@ -522,19 +522,21 @@ struct ProcessRowData: Identifiable {
     var id: Int32 { pid }
 }
 
-struct ProcessSectionData: Identifiable {
+struct ProcessSectionData: Identifiable, Equatable {
     let title: String
     let rows: [ProcessRowData]
-    let id = UUID()
+    // Identity must be stable across refresh ticks (titles are unique), otherwise
+    // SwiftUI tears down and rebuilds every section subtree on each tick.
+    var id: String { title }
 }
 
-struct UserPageSectionData: Identifiable {
-    let id = UUID()
+struct UserPageSectionData: Identifiable, Equatable {
     let userName: String
     let rows: [ProcessRowData]
+    var id: String { userName }
 }
 
-struct AppHistoryRowData: Identifiable {
+struct AppHistoryRowData: Identifiable, Equatable {
     let id: String
     let name: String
     let icon: NSImage?
@@ -625,7 +627,7 @@ enum StartupState: Equatable {
     }
 }
 
-struct StartupItemRowData: Identifiable {
+struct StartupItemRowData: Identifiable, Equatable {
     let id: String
     let name: String
     let icon: NSImage?
@@ -634,7 +636,7 @@ struct StartupItemRowData: Identifiable {
     let startupImpact: String
 }
 
-struct ServiceRowData: Identifiable {
+struct ServiceRowData: Identifiable, Equatable {
     let id: String
     let name: String
     let icon: NSImage?
@@ -645,7 +647,7 @@ struct ServiceRowData: Identifiable {
     let label: String
 }
 
-struct DetailProcessRowData: Identifiable {
+struct DetailProcessRowData: Identifiable, Equatable {
     let id: Int32
     let name: String
     let icon: NSImage?
@@ -821,7 +823,7 @@ struct ThermalState {
     var networkTemperatureChartCeilingCelsius: Double = 50
 }
 
-struct PerfSidebarItem: Identifiable {
+struct PerfSidebarItem: Identifiable, Equatable {
     let id: PerfSelection
     let title: String
     let subtitle: String

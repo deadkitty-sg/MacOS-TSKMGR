@@ -17,6 +17,9 @@ struct DetailsPageView: View {
     let onOpenServicesTab: () -> Void
     let onSetPriority: (Int32, ProcessPriorityPreset) -> Void
     @State private var searchText = ""
+    // Filter output is cached and recomputed only when its inputs change, not on
+    // every body evaluation (the monitor publishes ~every tick).
+    @State private var displayedRows: [DetailProcessRowData] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,7 +31,7 @@ struct DetailsPageView: View {
                 .padding(.bottom, 8)
 
             MetricTable(
-                rows: filteredRows,
+                rows: displayedRows,
                 columns: columns,
                 initialSortColumnID: "memory",
                 initialAscending: false,
@@ -39,12 +42,24 @@ struct DetailsPageView: View {
                 rowMenu: { detailsContextMenu(for: $0) }
             )
         }
+        .onAppear {
+            recomputeDisplayedRows()
+        }
+        .onChange(of: monitor.detailProcessRows) { _, _ in
+            recomputeDisplayedRows()
+        }
+        .onChange(of: searchText) { _, _ in
+            recomputeDisplayedRows()
+        }
     }
 
-    private var filteredRows: [DetailProcessRowData] {
+    private func recomputeDisplayedRows() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return monitor.detailProcessRows }
-        return monitor.detailProcessRows.filter { row in
+        guard !query.isEmpty else {
+            displayedRows = monitor.detailProcessRows
+            return
+        }
+        displayedRows = monitor.detailProcessRows.filter { row in
             row.name.lowercased().contains(query)
                 || String(row.pid).contains(query)
                 || row.userName.lowercased().contains(query)
@@ -83,12 +98,12 @@ struct DetailsPageView: View {
     private func detailsContextMenu(for row: DetailProcessRowData) -> some View {
         let processRow = toProcessRow(row)
         return Group {
-            if shouldShowRestartInsteadOfTerminate(processRow) {
+            if processRow.prefersRestartOverTerminate {
                 Button(language.text("重新启动", "Restart")) {
                     selectedPID = row.pid
                     onRestartTask(processRow)
                 }
-            } else if canTerminate(processRow) {
+            } else if processRow.canTerminate {
                 Button(language.text("结束任务", "End task")) {
                     selectedPID = row.pid
                     onEndTask(row.pid)
@@ -97,7 +112,7 @@ struct DetailsPageView: View {
                     selectedPID = row.pid
                     onEndProcessTree(row.pid)
                 }
-            } else if canRestart(processRow) {
+            } else if processRow.canRestartOnly {
                 Button(language.text("重新启动", "Restart")) {
                     selectedPID = row.pid
                     onRestartTask(processRow)
@@ -162,28 +177,7 @@ struct DetailsPageView: View {
         )
     }
 
-    private func canTerminate(_ row: ProcessRowData) -> Bool {
-        row.pid > 1 && row.pid != Int32(ProcessInfo.processInfo.processIdentifier)
-    }
-
-    private func canRestart(_ row: ProcessRowData) -> Bool {
-        !canTerminate(row) && row.isApp && !row.path.isEmpty
-    }
-
-    private func shouldShowRestartInsteadOfTerminate(_ row: ProcessRowData) -> Bool {
-        let lowerName = row.name.lowercased()
-        let lowerPath = row.path.lowercased()
-        return lowerName == "finder" || lowerName == "访达" || lowerPath.contains("/system/library/coreservices/finder.app")
-    }
-
     private func memoryText(for row: DetailProcessRowData) -> String {
-        switch memoryDisplayMode {
-        case .value:
-            return DisplayFormat.memory(row.memoryBytes)
-        case .percent:
-            guard monitor.memory.totalBytes > 0 else { return "0%" }
-            let percent = Double(row.memoryBytes) / Double(monitor.memory.totalBytes) * 100
-            return DisplayFormat.percentWithPrecision(percent, digits: 1)
-        }
+        ProcessRowFormatter.memoryText(bytes: row.memoryBytes, mode: memoryDisplayMode, totalMemoryBytes: monitor.memory.totalBytes)
     }
 }

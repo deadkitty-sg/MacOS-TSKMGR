@@ -5,24 +5,10 @@ struct AppHistoryPageView: View {
     @Environment(\.appLanguage) private var language
     @ObservedObject var monitor: SystemMonitor
     let onSearchWeb: (String) -> Void = { query in
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        if let url = URL(string: "https://www.google.com/search?q=\(encoded)") {
-            NSWorkspace.shared.open(url)
-        }
+        FinderInfo.searchWeb(query: query)
     }
     let onShowProperties: (AppHistoryRowData) -> Void = { row in
-        guard !row.path.isEmpty else { return }
-        let script = """
-        tell application "Finder"
-            activate
-            set targetItem to POSIX file "\(row.path)" as alias
-            open information window of targetItem
-        end tell
-        """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try? process.run()
+        FinderInfo.showProperties(path: row.path)
     }
     @State private var selectedRowID: String?
 

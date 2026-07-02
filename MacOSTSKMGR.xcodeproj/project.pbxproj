@@ -24,6 +24,9 @@
 		A0000000000000000000010E /* VisualEffects.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000E /* VisualEffects.swift */; };
 		B00000000000000000000003 /* MetricsKit in Frameworks */ = {isa = PBXBuildFile; productRef = B00000000000000000000002 /* MetricsKit */; };
 			A0000000000000000000010F /* MetricTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000F /* MetricTable.swift */; };
+		A000000000000000000001D1 /* ProcessContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D1 /* ProcessContextMenu.swift */; };
+		A000000000000000000001D2 /* RowFormatters.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D2 /* RowFormatters.swift */; };
+		A000000000000000000001D3 /* FinderInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D3 /* FinderInfo.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +47,9 @@
 		A0000000000000000000000E /* VisualEffects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualEffects.swift; sourceTree = "<group>"; };
 		A00000000000000000000020 /* MacOSTSKMGR.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacOSTSKMGR.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A0000000000000000000000F /* MetricTable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricTable.swift; sourceTree = "<group>"; };
+		A000000000000000000000D1 /* ProcessContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessContextMenu.swift; sourceTree = "<group>"; };
+		A000000000000000000000D2 /* RowFormatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowFormatters.swift; sourceTree = "<group>"; };
+		A000000000000000000000D3 /* FinderInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderInfo.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -107,6 +113,9 @@
 				A0000000000000000000000D /* UsersPageView.swift */,
 				A0000000000000000000000E /* VisualEffects.swift */,
 				A0000000000000000000000F /* MetricTable.swift */,
+				A000000000000000000000D1 /* ProcessContextMenu.swift */,
+				A000000000000000000000D2 /* RowFormatters.swift */,
+				A000000000000000000000D3 /* FinderInfo.swift */,
 			);
 			path = MacOSTSKMGR;
 			sourceTree = "<group>";
@@ -201,6 +210,9 @@
 				A0000000000000000000010D /* UsersPageView.swift in Sources */,
 				A0000000000000000000010E /* VisualEffects.swift in Sources */,
 				A0000000000000000000010F /* MetricTable.swift in Sources */,
+				A000000000000000000001D1 /* ProcessContextMenu.swift in Sources */,
+				A000000000000000000001D2 /* RowFormatters.swift in Sources */,
+				A000000000000000000001D3 /* FinderInfo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
