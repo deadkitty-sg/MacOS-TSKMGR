@@ -11,14 +11,20 @@ import Foundation
 ///      so `max(a - b, 0)` on unsigned values underflow-traps before `max` runs.
 /// Both are handled here by widening to 64-bit and using saturating deltas.
 ///
-/// These functions are covered by `MetricsKitTests`; the shipping engine should
-/// eventually call into this module directly instead of duplicating the math.
+/// These functions are covered by `MetricsKitTests`; the shipping engine calls
+/// into this module for all of its cumulative-counter delta arithmetic.
 public enum CPUMetrics {
 
     /// Saturating delta between two cumulative unsigned counters. Never traps:
     /// if the current sample is lower than the previous one, returns 0.
     public static func saturatingDelta(_ current: UInt32, _ previous: UInt32) -> UInt64 {
         current >= previous ? UInt64(current - previous) : 0
+    }
+
+    /// Saturating delta between two cumulative 64-bit counters (per-process CPU
+    /// time, disk/network byte counts, energy, wakeups). Never traps.
+    public static func saturatingDelta(_ current: UInt64, _ previous: UInt64) -> UInt64 {
+        current >= previous ? current - previous : 0
     }
 
     /// Aggregate host CPU utilization from cumulative user/system/idle/nice ticks.

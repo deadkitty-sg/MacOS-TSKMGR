@@ -1,3 +1,7 @@
+// NOTE: This file is a non-compiling design sketch. The `MLProgram { ... }`
+// builder DSL used below is not public CoreML API, so this probe cannot build;
+// it documents the intended shape of an ANE load generator. It is deliberately
+// excluded from the Tools package targets.
 import Foundation
 import CoreML
 

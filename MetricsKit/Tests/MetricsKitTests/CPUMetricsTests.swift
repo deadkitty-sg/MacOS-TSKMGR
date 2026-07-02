@@ -47,12 +47,27 @@ final class CPUMetricsTests: XCTestCase {
     // MARK: - Saturating delta
 
     func testSaturatingDeltaForward() {
-        XCTAssertEqual(CPUMetrics.saturatingDelta(300, 100), 200)
+        XCTAssertEqual(CPUMetrics.saturatingDelta(UInt32(300), UInt32(100)), 200)
     }
 
     func testSaturatingDeltaBackwardsIsZero() {
         // E-core park/unpark can make the counter go backwards.
-        XCTAssertEqual(CPUMetrics.saturatingDelta(100, 300), 0)
+        XCTAssertEqual(CPUMetrics.saturatingDelta(UInt32(100), UInt32(300)), 0)
+    }
+
+    func testSaturatingDelta64Forward() {
+        XCTAssertEqual(CPUMetrics.saturatingDelta(UInt64(300), UInt64(100)), 200)
+    }
+
+    func testSaturatingDelta64BackwardsIsZero() {
+        // Per-process counters reset when a PID is reused.
+        XCTAssertEqual(CPUMetrics.saturatingDelta(UInt64(100), UInt64(300)), 0)
+    }
+
+    func testSaturatingDelta64LargeValues() {
+        // Values above UInt32.max must not truncate.
+        let large = UInt64(UInt32.max) + 5_000_000_000
+        XCTAssertEqual(CPUMetrics.saturatingDelta(large, large - 42), 42)
     }
 
     // MARK: - Per-core utilization
