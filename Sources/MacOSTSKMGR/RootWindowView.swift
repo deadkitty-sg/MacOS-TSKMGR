@@ -15,15 +15,15 @@ private enum WindowPresentationMode: Equatable {
 }
 
 struct RootWindowView: View {
-    @StateObject private var monitor = SystemMonitor()
+    @ObservedObject var monitor: SystemMonitor
     @StateObject private var newTaskPanelManager = NewTaskPanelManager()
     @StateObject private var networkDetailsPanelManager = NetworkDetailsPanelManager()
     @StateObject private var aboutPanelManager = AboutPanelManager()
     @State private var language: AppLanguage = Self.defaultLanguageFromSystem()
-    @State private var temperatureUnit: TemperatureUnit = .celsius
+    @AppStorage("pref.temperatureUnit") private var temperatureUnit: TemperatureUnit = .celsius
     @State private var selectedTab: TaskTab = .processes
     @State private var selectedPerf: PerfSelection = .cpu
-    @State private var performanceViewMode: PerformanceViewMode = .full
+    @AppStorage("pref.performance.viewMode") private var performanceViewMode: PerformanceViewMode = .full
     @State private var showsPerformanceGraphs = true
     @State private var cpuGraphMode: CPUGraphMode = .logicalProcessors
     @State private var gpuGraphLayoutMode: GPUGraphLayoutMode = .multiEngine
@@ -39,8 +39,10 @@ struct RootWindowView: View {
     @State private var languageSubmenuHovered = false
     @State private var temperatureUnitParentHovered = false
     @State private var temperatureUnitSubmenuHovered = false
-    @State private var alwaysOnTop = false
+    @AppStorage("pref.alwaysOnTop") private var alwaysOnTop = false
     @AppStorage("pref.hideWhenMinimized") private var hideWhenMinimized = false
+    @AppStorage("pref.refreshSpeed") private var persistedRefreshSpeed: RefreshSpeedOption = .normal
+    @AppStorage("pref.showMenuBarExtra") private var showMenuBarExtra = false
     // Empty string = follow the system locale; otherwise an AppLanguage raw value
     // the user picked manually, which must survive relaunches and locale changes.
     @AppStorage("pref.languageOverride") private var languageOverride = ""
@@ -275,9 +277,11 @@ struct RootWindowView: View {
             }
             monitor.language = language
             monitor.temperatureUnit = temperatureUnit
+            monitor.setRefreshSpeed(persistedRefreshSpeed)
             monitor.start()
             monitor.setActivePage(selectedTab)
             updateWindowTrafficLights()
+            updateWindowLevel(alwaysOnTop: alwaysOnTop)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
             applySystemPresentationPreferences()
@@ -405,6 +409,10 @@ struct RootWindowView: View {
                     hideWhenMinimized.toggle()
                     activeMenu = nil
                 }
+                checkableMenuItem(language.text("菜单栏监视器(M)", "Menu bar monitor(M)"), checked: showMenuBarExtra) {
+                    showMenuBarExtra.toggle()
+                    activeMenu = nil
+                }
                 Divider()
                 subMenuItem(language.text("语言", "Language"), expanded: showLanguageSubmenu) {
                     languageMenu
@@ -449,6 +457,7 @@ struct RootWindowView: View {
             ForEach(RefreshSpeedOption.allCases) { option in
                 Button {
                     monitor.setRefreshSpeed(option)
+                    persistedRefreshSpeed = option
                     showRefreshSpeedSubmenu = false
                     activeMenu = nil
                 } label: {

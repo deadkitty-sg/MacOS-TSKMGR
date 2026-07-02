@@ -10,23 +10,50 @@ struct ServicesPageView: View {
     let onRestartService: (ServiceRowData) -> Void
     let onSearchWeb: (String) -> Void
     let onOpenDetailsTab: (Int32) -> Void
+    @State private var searchText = ""
 
     var body: some View {
-        MetricTable(
-            rows: monitor.serviceRows,
-            columns: columns,
-            initialSortColumnID: "name",
-            initialAscending: true,
-            minUsableWidth: 900,
-            isSelected: { row in
-                if let pid = row.pid { return selectedPID == pid }
-                return false
-            },
-            onSelect: { selectedPID = $0.pid },
-            rowMenu: { row in serviceContextMenu(for: row) }
-        )
+        VStack(alignment: .leading, spacing: 0) {
+            ProcessSearchField(
+                text: $searchText,
+                colorScheme: colorScheme,
+                language: language,
+                placeholder: language.text("筛选服务", "Filter services")
+            )
+            .frame(maxWidth: 340, alignment: .leading)
+            .padding(.top, 18)
+            .padding(.leading, 8)
+            .padding(.trailing, 14)
+            .padding(.bottom, 8)
+
+            MetricTable(
+                rows: filteredRows,
+                columns: columns,
+                initialSortColumnID: "name",
+                initialAscending: true,
+                minUsableWidth: 900,
+                topPadding: 0,
+                isSelected: { row in
+                    if let pid = row.pid { return selectedPID == pid }
+                    return false
+                },
+                onSelect: { selectedPID = $0.pid },
+                rowMenu: { row in serviceContextMenu(for: row) }
+            )
+        }
         .onAppear {
             monitor.refreshServicesNow()
+        }
+    }
+
+    private var filteredRows: [ServiceRowData] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return monitor.serviceRows }
+        return monitor.serviceRows.filter { row in
+            row.name.lowercased().contains(query)
+                || row.label.lowercased().contains(query)
+                || row.serviceDescription.lowercased().contains(query)
+                || row.pid.map { String($0).contains(query) } ?? false
         }
     }
 

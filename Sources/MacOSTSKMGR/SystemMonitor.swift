@@ -684,6 +684,7 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var cpu = CPUState()
     @Published private(set) var memory = MemoryState()
     @Published private(set) var thermal = ThermalState()
+    @Published private(set) var battery = BatteryState()
     @Published private(set) var disks: [DiskState] = []
     @Published private(set) var networks: [NetworkState] = []
     @Published private(set) var npus: [NPUState] = []
@@ -709,6 +710,8 @@ final class SystemMonitor: ObservableObject {
     private var previousProcessInterruptWakeups: [Int32: UInt64] = [:]
     private var processPowerTrendWatts: [Int32: Double] = [:]
     private var previousProcessNetworkTotals: [Int32: UInt64] = [:]
+    private var previousSwapIns: UInt64 = 0
+    private var previousSwapOuts: UInt64 = 0
     private var previousProcessMeteredNetworkTotals: [Int32: UInt64] = [:]
     private var appHistoryCPUBaseline: [Int32: Double] = [:]
     private var appHistoryNetworkBaseline: [Int32: UInt64] = [:]
@@ -883,6 +886,20 @@ final class SystemMonitor: ObservableObject {
             )
         )
 
+        if battery.isPresent {
+            items.append(
+                PerfSidebarItem(
+                    id: .battery,
+                    title: language.text("电池", "Battery"),
+                    subtitle: "\(DisplayFormat.percent(battery.chargePercent)) " + batteryPowerSourceText(),
+                    tertiary: battery.isCharging ? language.text("正在充电", "Charging") : nil,
+                    accent: Color(red: 0.18, green: 0.62, blue: 0.45),
+                    sparkline: battery.historyChargePercent,
+                    selectedFill: Color(red: 0.62, green: 0.82, blue: 1.0).opacity(0.45)
+                )
+            )
+        }
+
         return items
     }
 
@@ -906,6 +923,9 @@ final class SystemMonitor: ObservableObject {
             return gpuDetail(gpu)
         case .thermal:
             return thermalDetail()
+        case .battery:
+            guard battery.isPresent else { return nil }
+            return batteryDetail()
         }
     }
 
@@ -930,12 +950,13 @@ final class SystemMonitor: ObservableObject {
         lastMeasuredInterval = interval
 
         refreshCPU(interval: interval)
-        refreshMemory()
+        refreshMemory(interval: interval)
         refreshDisks(interval: interval)
         refreshNetworks(interval: interval)
         refreshNPUs()
         refreshGPUs()
         refreshThermal(interval: interval)
+        refreshBattery()
         // The heavy per-PID enumeration runs OFF the main actor. When it finishes
         // it hops back to the main actor and applies the process/detail/user/history
         // rows plus the CPU process/thread/handle counts — see applyProcessCollection.
@@ -1325,7 +1346,7 @@ final class SystemMonitor: ObservableObject {
         }
     }
 
-    private func refreshMemory() {
+    private func refreshMemory(interval: TimeInterval) {
         var stats = vm_statistics64()
         var count = hostVMInfo64Count
         let result = withUnsafeMutablePointer(to: &stats) { pointer in
@@ -1360,6 +1381,25 @@ final class SystemMonitor: ObservableObject {
         memory.wiredBytes = wired
         memory.appMemoryBytes = appMemory
         memory.swapUsedBytes = swapUsageBytes()
+
+        let pressureRaw = Int(sysctlInt("kern.memorystatus_vm_pressure_level") ?? 0)
+        memory.pressureLevel = MemoryPressureLevel(sysctlValue: pressureRaw)
+
+        var loads = [Double](repeating: 0, count: 3)
+        if getloadavg(&loads, 3) == 3 {
+            memory.loadAverage1 = loads[0]
+            memory.loadAverage5 = loads[1]
+            memory.loadAverage15 = loads[2]
+        }
+
+        // Swap in/out rate in pages per second, from the cumulative counters.
+        if previousSwapIns > 0 || previousSwapOuts > 0 {
+            memory.swapInsPerSecond = Double(CPUMetrics.saturatingDelta(stats.swapins, previousSwapIns)) / max(interval, 0.4)
+            memory.swapOutsPerSecond = Double(CPUMetrics.saturatingDelta(stats.swapouts, previousSwapOuts)) / max(interval, 0.4)
+        }
+        previousSwapIns = stats.swapins
+        previousSwapOuts = stats.swapouts
+
         memory.historyPercent = shifted(memory.historyPercent, adding: percent(used, total))
         memory.historyUsedBytes = shifted(memory.historyUsedBytes, adding: Double(used))
         memory.chartCeilingBytes = smoothedDynamicCeiling(
@@ -2072,7 +2112,10 @@ final class SystemMonitor: ObservableObject {
             rightPairs: [
                 .init(label: language.text("App 内存", "App memory"), value: DisplayFormat.memory(memory.appMemoryBytes)),
                 .init(label: language.text("联动内存", "Wired memory"), value: DisplayFormat.memory(memory.wiredBytes)),
-                .init(label: language.text("被压缩", "Compressed"), value: DisplayFormat.memory(memory.compressedBytes))
+                .init(label: language.text("被压缩", "Compressed"), value: DisplayFormat.memory(memory.compressedBytes)),
+                .init(label: language.text("内存压力", "Memory pressure"), value: memory.pressureLevel.displayTitle(in: language)),
+                .init(label: language.text("负载平均值", "Load average"), value: String(format: "%.2f  %.2f  %.2f", memory.loadAverage1, memory.loadAverage5, memory.loadAverage15)),
+                .init(label: language.text("交换换入/换出", "Swap in/out"), value: String(format: "%.0f/s / %.0f/s", memory.swapInsPerSecond, memory.swapOutsPerSecond))
             ],
             memoryComposition: true
         )
@@ -2221,6 +2264,75 @@ final class SystemMonitor: ObservableObject {
                 .init(label: language.text("交流/直流", "AC/DC"), value: thermalTemperatureText(thermal.powerSupplyTemperatureCelsius)),
                 .init(label: language.text("电源表面", "Power surface"), value: thermalTemperatureText(thermal.powerSurfaceTemperatureCelsius)),
                 .init(label: language.text("外壳温度", "Enclosure temperature"), value: thermalTemperatureText(thermal.enclosureTemperatureCelsius))
+            ],
+            memoryComposition: false
+        )
+    }
+
+    private func refreshBattery() {
+        let sample = BatteryProbe.sample()
+        guard sample.isPresent else {
+            if battery.isPresent {
+                battery = BatteryState()
+            }
+            return
+        }
+        var next = battery
+        next.isPresent = true
+        next.chargePercent = sample.chargePercent
+        next.isCharging = sample.isCharging
+        next.onACPower = sample.onACPower
+        next.timeRemainingMinutes = sample.timeRemainingMinutes
+        next.cycleCount = sample.cycleCount
+        next.healthPercent = sample.healthPercent
+        next.temperatureCelsius = sample.temperatureCelsius
+        next.adapterWatts = sample.adapterWatts
+        next.historyChargePercent = MonitorProbe.shifted(battery.historyChargePercent, adding: sample.chargePercent)
+        battery = next
+    }
+
+    func batteryPowerSourceText() -> String {
+        battery.onACPower ? language.text("交流电源", "AC power") : language.text("电池供电", "On battery")
+    }
+
+    func batteryTimeRemainingText() -> String {
+        guard let minutes = battery.timeRemainingMinutes else {
+            return language.text("正在计算", "Calculating")
+        }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        let clock = hours > 0 ? "\(hours):" + String(format: "%02d", remainder) : "\(remainder) min"
+        return battery.isCharging
+            ? language.text("充满还需 \(clock)", "\(clock) until full")
+            : language.text("剩余 \(clock)", "\(clock) remaining")
+    }
+
+    private func batteryDetail() -> PerformanceDetailViewData {
+        let stateText = battery.isCharging
+            ? language.text("正在充电", "Charging")
+            : batteryPowerSourceText()
+        return PerformanceDetailViewData(
+            title: language.text("电池", "Battery"),
+            topRight: stateText,
+            ceilingLabel: "100%",
+            chartCeiling: 100,
+            primaryLabel: language.text("电量", "Charge level"),
+            accent: Color(red: 0.18, green: 0.62, blue: 0.45),
+            chartSets: [battery.historyChargePercent],
+            lowerChart: nil,
+            lowerChartValueCeiling: nil,
+            lowerChartCeiling: nil,
+            lowerLabel: nil,
+            leftMetrics: [
+                .init(label: language.text("电量", "Charge"), value: DisplayFormat.percent(battery.chargePercent), prominent: true),
+                .init(label: language.text("状态", "State"), value: stateText, prominent: true),
+                .init(label: language.text("剩余时间", "Time remaining"), value: batteryTimeRemainingText(), prominent: true)
+            ],
+            rightPairs: [
+                .init(label: language.text("循环计数", "Cycle count"), value: battery.cycleCount.map(String.init) ?? "--"),
+                .init(label: language.text("电池健康", "Battery health"), value: battery.healthPercent.map { DisplayFormat.percentWithPrecision($0, digits: 0) } ?? "--"),
+                .init(label: language.text("电池温度", "Battery temperature"), value: temperatureUnit.format(battery.temperatureCelsius)),
+                .init(label: language.text("电源适配器", "Power adapter"), value: battery.adapterWatts.map { DisplayFormat.watts($0) } ?? "--")
             ],
             memoryComposition: false
         )

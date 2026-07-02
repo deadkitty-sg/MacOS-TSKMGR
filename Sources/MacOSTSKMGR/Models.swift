@@ -366,7 +366,7 @@ enum RefreshSpeedOption: String, CaseIterable, Identifiable {
     }
 }
 
-enum ProcessSortKey {
+enum ProcessSortKey: String {
     case name
     case status
     case cpu
@@ -418,6 +418,7 @@ enum PerfSelection: Hashable, Identifiable {
     case npu(String)
     case gpu(String)
     case thermal
+    case battery
 
     var id: String {
         switch self {
@@ -435,11 +436,13 @@ enum PerfSelection: Hashable, Identifiable {
             "gpu-\(gpuID)"
         case .thermal:
             "thermal"
+        case .battery:
+            "battery"
         }
     }
 }
 
-enum PerformanceViewMode {
+enum PerformanceViewMode: String {
     case full
     case summary
     case detailSummary
@@ -685,6 +688,33 @@ struct CPUState {
     var coreHistories: [[Double]] = []
 }
 
+/// Kernel memory-pressure level from `kern.memorystatus_vm_pressure_level`
+/// (1 = normal, 2 = warning, 4 = critical).
+enum MemoryPressureLevel: Equatable {
+    case normal
+    case warning
+    case critical
+    case unknown
+
+    init(sysctlValue: Int) {
+        switch sysctlValue {
+        case 1: self = .normal
+        case 2: self = .warning
+        case 4: self = .critical
+        default: self = .unknown
+        }
+    }
+
+    func displayTitle(in language: AppLanguage) -> String {
+        switch self {
+        case .normal: language.text("正常", "Normal")
+        case .warning: language.text("警告", "Warning")
+        case .critical: language.text("严重", "Critical")
+        case .unknown: "--"
+        }
+    }
+}
+
 struct MemoryState {
     var totalBytes: UInt64 = 0
     var usedBytes: UInt64 = 0
@@ -694,6 +724,12 @@ struct MemoryState {
     var swapUsedBytes: UInt64 = 0
     var appMemoryBytes: UInt64 = 0
     var wiredBytes: UInt64 = 0
+    var pressureLevel: MemoryPressureLevel = .unknown
+    var loadAverage1: Double = 0
+    var loadAverage5: Double = 0
+    var loadAverage15: Double = 0
+    var swapInsPerSecond: Double = 0
+    var swapOutsPerSecond: Double = 0
     var historyPercent: [Double] = Array(repeating: 0, count: 60)
     var historyUsedBytes: [Double] = Array(repeating: 0, count: 60)
     var chartCeilingBytes: Double = 1
@@ -796,6 +832,21 @@ struct NPUState: Identifiable {
     var historyDataMovementBytes: [Double]
     var historyFootprint: [Double]
     var historyMemoryPressure: [Double]
+}
+
+struct BatteryState: Equatable {
+    var isPresent: Bool = false
+    var chargePercent: Double = 0
+    var isCharging: Bool = false
+    var onACPower: Bool = false
+    /// Minutes to empty (on battery) or to full (charging); nil while the
+    /// power-management estimate is still being calculated.
+    var timeRemainingMinutes: Int? = nil
+    var cycleCount: Int? = nil
+    var healthPercent: Double? = nil
+    var temperatureCelsius: Double? = nil
+    var adapterWatts: Double? = nil
+    var historyChargePercent: [Double] = Array(repeating: 0, count: 60)
 }
 
 struct ThermalState {

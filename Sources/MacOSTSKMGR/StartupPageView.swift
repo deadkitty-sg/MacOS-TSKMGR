@@ -5,10 +5,18 @@ struct StartupPageView: View {
     @Environment(\.appLanguage) private var language
     @ObservedObject var monitor: SystemMonitor
     @State private var selectedRowID: String?
+    @State private var searchText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
+                ProcessSearchField(
+                    text: $searchText,
+                    colorScheme: colorScheme,
+                    language: language,
+                    placeholder: language.text("筛选启动项", "Filter startup items")
+                )
+                .frame(maxWidth: 340, alignment: .leading)
                 Spacer()
                 if let bootDuration = monitor.currentBootDurationSeconds() {
                     Text(language.text("本次系统启动时间: ", "Startup time: ") + "\(String(format: "%.1f", bootDuration)) " + language.text("秒", "s"))
@@ -22,7 +30,7 @@ struct StartupPageView: View {
             .padding(.bottom, 10)
 
             MetricTable(
-                rows: monitor.startupRows,
+                rows: filteredRows,
                 columns: columns,
                 initialSortColumnID: "name",
                 initialAscending: true,
@@ -51,6 +59,15 @@ struct StartupPageView: View {
                     .disabled(!canShowStartupItemProperties(row))
                 }
             )
+        }
+    }
+
+    private var filteredRows: [StartupItemRowData] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return monitor.startupRows }
+        return monitor.startupRows.filter { row in
+            row.name.lowercased().contains(query)
+                || row.publisher.lowercased().contains(query)
         }
     }
 

@@ -353,6 +353,9 @@ struct PerformancePageView: View {
                     } else if case .thermal = selectedPerf {
                         thermalStatsPanel()
                             .padding(.top, 8)
+                    } else if case .battery = selectedPerf {
+                        batteryStatsPanel()
+                            .padding(.top, 8)
                     } else if isGPU || isNetwork || isNPU {
                         sideBySideStatsPanel(detail)
                             .padding(.top, 8)
@@ -398,6 +401,7 @@ struct PerformancePageView: View {
         if case .memory = selectedPerf { return true }
         if case .network = selectedPerf { return true }
         if case .thermal = selectedPerf { return true }
+        if case .battery = selectedPerf { return true }
         return false
     }
 
@@ -405,6 +409,7 @@ struct PerformancePageView: View {
         if case .memory = selectedPerf { return true }
         if case .network = selectedPerf { return true }
         if case .thermal = selectedPerf { return true }
+        if case .battery = selectedPerf { return true }
         return false
     }
 
@@ -522,7 +527,7 @@ struct PerformancePageView: View {
             cpuContextMenu()
         case .gpu:
             gpuContextMenu()
-        case .memory, .disk, .network, .npu, .thermal:
+        case .memory, .disk, .network, .npu, .thermal, .battery:
             detailContextMenu()
         }
     }
@@ -689,6 +694,29 @@ struct PerformancePageView: View {
                     (language.text("整机温度", "System temperature"), thermalValue(monitor.thermal.systemTemperatureCelsius)),
                     (language.text("交流/直流", "AC/DC"), thermalValue(monitor.thermal.powerSupplyTemperatureCelsius)),
                     (language.text("电源表面", "Power surface"), thermalValue(monitor.thermal.powerSurfaceTemperatureCelsius))
+                ]
+            )
+        }
+        .frame(maxWidth: 720, alignment: .leading)
+    }
+
+    private func batteryStatsPanel() -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            memoryStatsSection(
+                title: language.text("当前状态", "Current status"),
+                rows: [
+                    (language.text("电量", "Charge"), DisplayFormat.percent(monitor.battery.chargePercent)),
+                    (language.text("电源", "Power source"), monitor.batteryPowerSourceText()),
+                    (language.text("剩余时间", "Time remaining"), monitor.batteryTimeRemainingText()),
+                    (language.text("电源适配器", "Power adapter"), monitor.battery.adapterWatts.map { DisplayFormat.watts($0) } ?? "--")
+                ]
+            )
+            memoryStatsSection(
+                title: language.text("电池健康", "Battery health"),
+                rows: [
+                    (language.text("循环计数", "Cycle count"), monitor.battery.cycleCount.map(String.init) ?? "--"),
+                    (language.text("健康度", "Health"), monitor.battery.healthPercent.map { DisplayFormat.percentWithPrecision($0, digits: 0) } ?? "--"),
+                    (language.text("电池温度", "Battery temperature"), thermalValue(monitor.battery.temperatureCelsius))
                 ]
             )
         }

@@ -42,6 +42,7 @@ struct UsersPageView: View {
     @State private var expanded = true
     @State private var sortKey: UsersSortKey = .memory
     @State private var ascending = false
+    @State private var searchText = ""
     // Sorted output is cached and recomputed only when its inputs change, not on
     // every body evaluation (the monitor publishes ~every tick).
     @State private var displayedRows: [ProcessRowData] = []
@@ -57,6 +58,10 @@ struct UsersPageView: View {
             let totalNetwork = rows.reduce(UInt64(0)) { $0 + $1.networkBytesPerSecond }
 
             VStack(alignment: .leading, spacing: 0) {
+                ProcessSearchField(text: $searchText, colorScheme: colorScheme, language: language)
+                    .frame(width: min(widths.total, 340), alignment: .leading)
+                    .padding(.bottom, 8)
+
                 HStack(spacing: 0) {
                     headerCell(language.text("用户", "User"), sortKey: .user, width: widths.user)
                     headerCell(language.text("状态", "Status"), sortKey: .status, width: widths.status)
@@ -156,10 +161,22 @@ struct UsersPageView: View {
         .onChange(of: monitor.currentUserAppRows) { _, _ in
             recomputeDisplayedRows()
         }
+        .onChange(of: searchText) { _, _ in
+            recomputeDisplayedRows()
+        }
     }
 
     private func recomputeDisplayedRows() {
-        displayedRows = monitor.currentUserAppRows.sorted { lhs, rhs in
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var rows = monitor.currentUserAppRows
+        if !query.isEmpty {
+            rows = rows.filter { row in
+                row.name.lowercased().contains(query)
+                    || String(row.pid).contains(query)
+                    || row.path.lowercased().contains(query)
+            }
+        }
+        displayedRows = rows.sorted { lhs, rhs in
             let result: Bool
             switch sortKey {
             case .user:

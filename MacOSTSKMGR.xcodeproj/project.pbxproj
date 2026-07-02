@@ -27,6 +27,8 @@
 		A000000000000000000001D1 /* ProcessContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D1 /* ProcessContextMenu.swift */; };
 		A000000000000000000001D2 /* RowFormatters.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D2 /* RowFormatters.swift */; };
 		A000000000000000000001D3 /* FinderInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D3 /* FinderInfo.swift */; };
+		A000000000000000000001D4 /* BatteryProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D4 /* BatteryProbe.swift */; };
+		A000000000000000000001D5 /* SearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000D5 /* SearchField.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +52,8 @@
 		A000000000000000000000D1 /* ProcessContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessContextMenu.swift; sourceTree = "<group>"; };
 		A000000000000000000000D2 /* RowFormatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowFormatters.swift; sourceTree = "<group>"; };
 		A000000000000000000000D3 /* FinderInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderInfo.swift; sourceTree = "<group>"; };
+		A000000000000000000000D4 /* BatteryProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryProbe.swift; sourceTree = "<group>"; };
+		A000000000000000000000D5 /* SearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchField.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +120,8 @@
 				A000000000000000000000D1 /* ProcessContextMenu.swift */,
 				A000000000000000000000D2 /* RowFormatters.swift */,
 				A000000000000000000000D3 /* FinderInfo.swift */,
+				A000000000000000000000D4 /* BatteryProbe.swift */,
+				A000000000000000000000D5 /* SearchField.swift */,
 			);
 			path = MacOSTSKMGR;
 			sourceTree = "<group>";
@@ -213,6 +219,8 @@
 				A000000000000000000001D1 /* ProcessContextMenu.swift in Sources */,
 				A000000000000000000001D2 /* RowFormatters.swift in Sources */,
 				A000000000000000000001D3 /* FinderInfo.swift in Sources */,
+				A000000000000000000001D4 /* BatteryProbe.swift in Sources */,
+				A000000000000000000001D5 /* SearchField.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
