@@ -673,6 +673,8 @@ struct ProcessRawSnapshot: Sendable {
     let uid: uid_t
     let bsdStatus: UInt32
     let flags: UInt32
+    let neuralFootprintBytes: UInt64
+    let neuralFootprintPeakBytes: UInt64
 }
 
 @MainActor
@@ -740,6 +742,8 @@ final class SystemMonitor: ObservableObject {
     private var lastServicesRefreshDate: Date = .distantPast
     private var disabledLaunchdByGroup: [String: Set<String>] = [:]
     private var aneInfoCache: ANEDeviceInfo?
+    private var latestNeuralUsageTotals = NeuralUsageTotals(currentBytes: 0, intervalPeakBytes: 0)
+    private var gpuStaticInfoCache: [GPUStaticSnapshot]?
     private var hasStarted = false
     private var processNetworkTotals: [Int32: UInt64] = [:]
     private var meteredProcessNetworkTotals: [Int32: UInt64] = [:]
@@ -1008,10 +1012,17 @@ final class SystemMonitor: ObservableObject {
         snapshotCache.reserveCapacity(raws.count)
         var pids: [Int32] = []
         pids.reserveCapacity(raws.count)
+        var neuralTotal: UInt64 = 0
+        var neuralPeak: UInt64 = 0
         for raw in raws {
             snapshotCache[raw.pid] = ProcessSnapshot(raw: raw, icon: iconForProcess(path: raw.path))
             pids.append(raw.pid)
+            neuralTotal += raw.neuralFootprintBytes
+            neuralPeak = max(neuralPeak, raw.neuralFootprintPeakBytes)
         }
+        // The NPU probe reads these instead of running its own full-PID rusage
+        // sweep every tick.
+        latestNeuralUsageTotals = NeuralUsageTotals(currentBytes: neuralTotal, intervalPeakBytes: neuralPeak)
         tickPIDsCache = pids
         tickProcessSnapshotCache = snapshotCache
         defer {
@@ -1103,16 +1114,25 @@ final class SystemMonitor: ObservableObject {
 
     private func scheduleProcessNetworkProbe(ifNeededAt now: Date, force: Bool = false) {
         guard processNetworkProbeTask == nil else { return }
+        // Per-process network attribution is only rendered on these tabs; skip the
+        // nettop spawn entirely while anything else is visible.
+        let pagesNeedingPerProcessNetwork: Set<TaskTab> = [.processes, .users, .history]
+        guard force || pagesNeedingPerProcessNetwork.contains(activePage) else { return }
         let minimumInterval = max(refreshSpeed.interval ?? 1.0, 0.5)
         guard force || processNetworkTotals.isEmpty || now.timeIntervalSince(lastProcessNetworkProbeDate) >= minimumInterval else { return }
 
+        // The metered breakdown is only shown in App history; don't pay for a
+        // second nettop run anywhere else.
+        let includeMetered = activePage == .history
         lastProcessNetworkProbeDate = now
         processNetworkProbeTask = Task.detached(priority: .utility) {
             let totals = MonitorProbe.collectProcessNetworkSnapshot(interfaceFilter: nil)
-            let meteredTotals = MonitorProbe.collectProcessNetworkSnapshot(interfaceFilter: "expensive")
+            let meteredTotals = includeMetered ? MonitorProbe.collectProcessNetworkSnapshot(interfaceFilter: "expensive") : nil
             await MainActor.run {
                 self.processNetworkTotals = totals
-                self.meteredProcessNetworkTotals = meteredTotals
+                if let meteredTotals {
+                    self.meteredProcessNetworkTotals = meteredTotals
+                }
                 self.processNetworkProbeTask = nil
             }
         }
@@ -1124,10 +1144,15 @@ final class SystemMonitor: ObservableObject {
 
         let previousGPUs = gpus
         let language = language
+        let cachedStaticInfo = gpuStaticInfoCache
         lastGPUProbeDate = now
         gpuProbeTask = Task.detached(priority: .utility) {
-            let nextGPUs = MonitorProbe.collectGPUStates(previous: previousGPUs, language: language)
+            let staticInfo = cachedStaticInfo ?? MonitorProbe.collectGPUStaticInfo() ?? []
+            let nextGPUs = MonitorProbe.collectGPUStates(previous: previousGPUs, language: language, staticItems: staticInfo)
             await MainActor.run {
+                if self.gpuStaticInfoCache == nil, !staticInfo.isEmpty {
+                    self.gpuStaticInfoCache = staticInfo
+                }
                 self.gpus = nextGPUs
                 self.gpuProbeTask = nil
             }
@@ -1162,6 +1187,7 @@ final class SystemMonitor: ObservableObject {
         let totalMemory = memory.totalBytes
         let samplingDurationMilliseconds = max(UInt64((minimumInterval * 1000).rounded()), 500)
         let aneSampler = aneIOReportSampler
+        let neuralUsage = latestNeuralUsageTotals
         lastNPUUsageProbeDate = now
         npuUsageProbeTask = Task.detached(priority: .utility) {
             let sampledMetrics = await aneSampler?.sampleMetrics(durationMilliseconds: samplingDurationMilliseconds, count: 4)
@@ -1171,6 +1197,7 @@ final class SystemMonitor: ObservableObject {
                 previous: previousNPU,
                 aneInfo: aneInfo,
                 totalMemory: totalMemory,
+                usage: neuralUsage,
                 activeTimePercent: aneMetrics.activeTimePercent,
                 powerWatts: aneMetrics.watts,
                 dataReadBytesPerSecond: aneMetrics.dataReadBytesPerSecond,
@@ -2384,9 +2411,19 @@ extension SystemMonitor {
         let activeClientCount: Int
     }
 
-    struct NeuralUsageTotals {
+    struct NeuralUsageTotals: Sendable {
         let currentBytes: UInt64
         let intervalPeakBytes: UInt64
+    }
+
+    /// Hardware facts from `system_profiler SPDisplaysDataType` that never change
+    /// while the app runs. Collected once so the (often ~1 s) profiler call is not
+    /// re-spawned every GPU tick.
+    struct GPUStaticSnapshot: Sendable {
+        let model: String
+        let metalRaw: String
+        let coreCount: Int
+        let busRaw: String?
     }
 
     struct ThermalSnapshot {
@@ -3104,7 +3141,9 @@ extension SystemMonitor {
             isApplication: app,
             uid: bsdInfo.pbi_uid,
             bsdStatus: bsdInfo.pbi_status,
-            flags: bsdInfo.pbi_flags
+            flags: bsdInfo.pbi_flags,
+            neuralFootprintBytes: usageResult == 0 ? usage.ri_neural_footprint : 0,
+            neuralFootprintPeakBytes: usageResult == 0 ? usage.ri_interval_max_neural_footprint : 0
         )
     }
 
@@ -3184,12 +3223,44 @@ extension SystemMonitor {
         return icon
     }
 
+    private struct InterfaceRawSample {
+        var inBytes: UInt64 = 0
+        var outBytes: UInt64 = 0
+        var packetsIn: UInt64 = 0
+        var packetsOut: UInt64 = 0
+        var multicastIn: UInt64 = 0
+        var multicastOut: UInt64 = 0
+        var errorsIn: UInt64 = 0
+        var errorsOut: UInt64 = 0
+        var dropsIn: UInt64 = 0
+        var mtu: UInt32 = 0
+        var baudRate: UInt64 = 0
+
+        mutating func merge(_ data: if_data) {
+            // An interface appears several times in the ifaddrs list (AF_LINK plus
+            // one entry per address); counters are monotonic, so keep the max.
+            inBytes = max(inBytes, UInt64(data.ifi_ibytes))
+            outBytes = max(outBytes, UInt64(data.ifi_obytes))
+            packetsIn = max(packetsIn, UInt64(data.ifi_ipackets))
+            packetsOut = max(packetsOut, UInt64(data.ifi_opackets))
+            multicastIn = max(multicastIn, UInt64(data.ifi_imcasts))
+            multicastOut = max(multicastOut, UInt64(data.ifi_omcasts))
+            errorsIn = max(errorsIn, UInt64(data.ifi_ierrors))
+            errorsOut = max(errorsOut, UInt64(data.ifi_oerrors))
+            dropsIn = max(dropsIn, UInt64(data.ifi_iqdrops))
+            mtu = max(mtu, data.ifi_mtu)
+            baudRate = max(baudRate, UInt64(data.ifi_baudrate))
+        }
+    }
+
     func networkInterfaces() -> [InterfaceSnapshot] {
+        // Single getifaddrs traversal per tick: every if_data field is captured in
+        // one pass instead of re-enumerating the interface list per counter.
         var pointer: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
         defer { freeifaddrs(pointer) }
 
-        var byteCounters: [String: (UInt64, UInt64)] = [:]
+        var samples: [String: InterfaceRawSample] = [:]
         var ipv4Map: [String: String] = [:]
         var ipv6Map: [String: String] = [:]
 
@@ -3200,8 +3271,9 @@ extension SystemMonitor {
             let flags = Int32(ifa.ifa_flags)
             if (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 {
                 if let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) {
-                    let existing = byteCounters[name] ?? (0, 0)
-                    byteCounters[name] = (max(existing.0, UInt64(data.pointee.ifi_ibytes)), max(existing.1, UInt64(data.pointee.ifi_obytes)))
+                    var sample = samples[name] ?? InterfaceRawSample()
+                    sample.merge(data.pointee)
+                    samples[name] = sample
                 }
                 if let addr = ifa.ifa_addr {
                     let family = addr.pointee.sa_family
@@ -3224,7 +3296,8 @@ extension SystemMonitor {
             current = next
         }
 
-        return byteCounters.keys.map { name in
+        return samples.keys.map { name in
+            let sample = samples[name] ?? InterfaceRawSample()
             let hardwarePort = hardwarePortMap[name] ?? ""
             let medium: String
             let displayName: String
@@ -3263,18 +3336,18 @@ extension SystemMonitor {
                 isPrimaryCandidate: hardwarePort == "Wi-Fi" || hardwarePort.localizedCaseInsensitiveContains("Ethernet") || hardwarePort.localizedCaseInsensitiveContains("LAN"),
                 ipv4: ipv4Map[name] ?? "",
                 ipv6: ipv6Map[name] ?? "",
-                inBytes: byteCounters[name]?.0 ?? 0,
-                outBytes: byteCounters[name]?.1 ?? 0,
-                packetsIn: interfaceCounter(name: name, keyPath: \.ifi_ipackets),
-                packetsOut: interfaceCounter(name: name, keyPath: \.ifi_opackets),
-                multicastIn: interfaceCounter(name: name, keyPath: \.ifi_imcasts),
-                multicastOut: interfaceCounter(name: name, keyPath: \.ifi_omcasts),
-                errorsIn: interfaceCounter(name: name, keyPath: \.ifi_ierrors),
-                errorsOut: interfaceCounter(name: name, keyPath: \.ifi_oerrors),
-                dropsIn: interfaceCounter(name: name, keyPath: \.ifi_iqdrops),
+                inBytes: sample.inBytes,
+                outBytes: sample.outBytes,
+                packetsIn: sample.packetsIn,
+                packetsOut: sample.packetsOut,
+                multicastIn: sample.multicastIn,
+                multicastOut: sample.multicastOut,
+                errorsIn: sample.errorsIn,
+                errorsOut: sample.errorsOut,
+                dropsIn: sample.dropsIn,
                 dropsOut: 0,
-                mtu: interfaceMTU(name: name),
-                lineSpeedBitsPerSecond: interfaceLineSpeed(name: name, medium: medium)
+                mtu: sample.mtu,
+                lineSpeedBitsPerSecond: interfaceLineSpeed(name: name, medium: medium, baudRate: sample.baudRate)
             )
         }
     }
@@ -3344,29 +3417,11 @@ extension SystemMonitor {
         return snapshot.medium
     }
 
-    func interfaceLineSpeed(name: String, medium: String) -> UInt64 {
+    func interfaceLineSpeed(name: String, medium: String, baudRate: UInt64) -> UInt64 {
         if medium == "Wi-Fi" {
             return wifiTransmitRateBitsPerSecond(interfaceName: name)
         }
-        return interfaceBaudRate(name: name)
-    }
-
-    func interfaceBaudRate(name: String) -> UInt64 {
-        var pointer: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&pointer) == 0, let first = pointer else { return 0 }
-        defer { freeifaddrs(pointer) }
-
-        var current = first
-        while true {
-            let ifa = current.pointee
-            let currentName = String(cString: ifa.ifa_name)
-            if currentName == name, let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) {
-                return UInt64(data.pointee.ifi_baudrate)
-            }
-            guard let next = ifa.ifa_next else { break }
-            current = next
-        }
-        return 0
+        return baudRate
     }
 
     func wifiTransmitRateBitsPerSecond(interfaceName: String) -> UInt64 {
@@ -3376,42 +3431,6 @@ extension SystemMonitor {
         let rateMbps = interface.transmitRate()
         guard rateMbps > 0 else { return 0 }
         return UInt64(rateMbps * 1_000_000)
-    }
-
-    func interfaceCounter(name: String, keyPath: KeyPath<if_data, UInt32>) -> UInt64 {
-        var pointer: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&pointer) == 0, let first = pointer else { return 0 }
-        defer { freeifaddrs(pointer) }
-
-        var current = first
-        while true {
-            let ifa = current.pointee
-            let currentName = String(cString: ifa.ifa_name)
-            if currentName == name, let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) {
-                return UInt64(data.pointee[keyPath: keyPath])
-            }
-            guard let next = ifa.ifa_next else { break }
-            current = next
-        }
-        return 0
-    }
-
-    func interfaceMTU(name: String) -> UInt32 {
-        var pointer: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&pointer) == 0, let first = pointer else { return 0 }
-        defer { freeifaddrs(pointer) }
-
-        var current = first
-        while true {
-            let ifa = current.pointee
-            let currentName = String(cString: ifa.ifa_name)
-            if currentName == name, let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) {
-                return data.pointee.ifi_mtu
-            }
-            guard let next = ifa.ifa_next else { break }
-            current = next
-        }
-        return 0
     }
 
     func currentPrimaryCPUSpeedText() -> String {
@@ -4079,6 +4098,7 @@ private enum MonitorProbe {
         previous: NPUState?,
         aneInfo: SystemMonitor.ANEDeviceInfo?,
         totalMemory: UInt64,
+        usage: SystemMonitor.NeuralUsageTotals,
         activeTimePercent: Double,
         powerWatts: Double,
         dataReadBytesPerSecond: UInt64,
@@ -4086,8 +4106,6 @@ private enum MonitorProbe {
         dataMovementBytesPerSecond: UInt64
     ) -> NPUState? {
         guard let aneInfo else { return nil }
-
-        let usage = currentNeuralUsageTotals()
         let peakFootprint = max(previous?.peakNeuralFootprintBytes ?? 0, usage.intervalPeakBytes, usage.currentBytes, 1)
         let peakPowerWatts = max(previous?.peakPowerWatts ?? 0, powerWatts)
         let peakDataMovement = max(previous?.peakDataMovementBytesPerSecond ?? 0, dataMovementBytesPerSecond, 1)
@@ -4132,46 +4150,69 @@ private enum MonitorProbe {
         )
     }
 
-    static func collectGPUStates(previous: [GPUState], language: AppLanguage) -> [GPUState] {
+    static func collectGPUStaticInfo() -> [SystemMonitor.GPUStaticSnapshot]? {
         guard
             let profilerData = try? Process.runAndCapture("/usr/sbin/system_profiler", ["SPDisplaysDataType", "-json"]),
             let profilerJSON = try? JSONSerialization.jsonObject(with: profilerData) as? [String: Any],
-            let profilerItems = profilerJSON["SPDisplaysDataType"] as? [[String: Any]],
-            let acceleratorData = try? Process.runAndCapture("/usr/sbin/ioreg", ["-r", "-d", "1", "-c", "IOAccelerator", "-a", "-l"]),
-            let acceleratorArray = try? PropertyListSerialization.propertyList(from: acceleratorData, options: [], format: nil) as? [[String: Any]]
+            let profilerItems = profilerJSON["SPDisplaysDataType"] as? [[String: Any]]
         else {
-            return previous
+            return nil
         }
+        return profilerItems.map { item in
+            SystemMonitor.GPUStaticSnapshot(
+                model: item["sppci_model"] as? String ?? item["_name"] as? String ?? "",
+                metalRaw: item["spdisplays_mtlgpufamilysupport"] as? String ?? "",
+                coreCount: Int(item["sppci_cores"] as? String ?? "") ?? 0,
+                busRaw: item["sppci_bus"] as? String
+            )
+        }
+    }
 
+    /// Reads each IOAccelerator's PerformanceStatistics directly from the IO
+    /// registry — no `ioreg` process spawn per tick.
+    static func acceleratorPerformanceStatisticsByRegistryID() -> [UInt64: [String: Any]] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &iterator) == KERN_SUCCESS else {
+            return [:]
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var result: [UInt64: [String: Any]] = [:]
+        while true {
+            let service = IOIteratorNext(iterator)
+            if service == 0 { break }
+            defer { IOObjectRelease(service) }
+
+            var registryID: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(service, &registryID) == KERN_SUCCESS else { continue }
+            guard let statsRef = IORegistryEntryCreateCFProperty(service, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0) else { continue }
+            if let stats = statsRef.takeRetainedValue() as? [String: Any] {
+                result[registryID] = stats
+            }
+        }
+        return result
+    }
+
+    static func collectGPUStates(previous: [GPUState], language: AppLanguage, staticItems: [SystemMonitor.GPUStaticSnapshot]) -> [GPUState] {
         let devices = MTLCopyAllDevices()
-        let acceleratorByRegistryID = Dictionary(
-            acceleratorArray.compactMap { entry -> (UInt64, [String: Any])? in
-                guard let registryID = (entry["IORegistryEntryID"] as? NSNumber)?.uint64Value else { return nil }
-                return (registryID, entry)
-            },
-            uniquingKeysWith: { current, _ in current }
-        )
+        guard !devices.isEmpty else { return previous }
+        let statsByRegistryID = acceleratorPerformanceStatisticsByRegistryID()
 
         var next: [GPUState] = []
-        let gpuCount = max(profilerItems.count, devices.count)
+        let gpuCount = max(staticItems.count, devices.count)
 
         for (index, device) in devices.enumerated() {
-            let ioEntry = acceleratorByRegistryID[device.registryID]
-            let matchedProfilerItem = profilerItems.first { item in
-                let itemModel = item["sppci_model"] as? String ?? item["_name"] as? String ?? ""
-                if itemModel.isEmpty { return false }
-                return itemModel.localizedCaseInsensitiveContains(device.name) || device.name.localizedCaseInsensitiveContains(itemModel)
-            } ?? profilerItems[safe: index]
+            let matched = staticItems.first { item in
+                if item.model.isEmpty { return false }
+                return item.model.localizedCaseInsensitiveContains(device.name) || device.name.localizedCaseInsensitiveContains(item.model)
+            } ?? staticItems[safe: index]
 
-            let model = matchedProfilerItem?["sppci_model"] as? String
-                ?? matchedProfilerItem?["_name"] as? String
-                ?? device.name
-            let metalRaw = matchedProfilerItem?["spdisplays_mtlgpufamilysupport"] as? String ?? ""
-            let metalVersion = resolvedMetalVersion(raw: metalRaw, device: device)
-            let coreCount = Int(matchedProfilerItem?["sppci_cores"] as? String ?? "") ?? 0
-            let gpuType = resolvedGPUType(device: device, profilerItem: matchedProfilerItem, language: language)
+            let model = (matched?.model.isEmpty == false ? matched?.model : nil) ?? device.name
+            let metalVersion = resolvedMetalVersion(raw: matched?.metalRaw ?? "", device: device)
+            let coreCount = matched?.coreCount ?? 0
+            let gpuType = resolvedGPUType(device: device, busRaw: matched?.busRaw, language: language)
 
-            let performance = ioEntry?["PerformanceStatistics"] as? [String: Any]
+            let performance = statsByRegistryID[device.registryID]
             let deviceUtil = (performance?["Device Utilization %"] as? NSNumber)?.doubleValue ?? 0
             let rendererUtil = (performance?["Renderer Utilization %"] as? NSNumber)?.doubleValue ?? 0
             let tilerUtil = (performance?["Tiler Utilization %"] as? NSNumber)?.doubleValue ?? 0
@@ -4628,25 +4669,6 @@ private enum MonitorProbe {
         return "Loaded"
     }
 
-    static func currentNeuralUsageTotals() -> SystemMonitor.NeuralUsageTotals {
-        let pids = listPIDs()
-        var total: UInt64 = 0
-        var peak: UInt64 = 0
-        for pid in pids where pid > 0 {
-            var usage = rusage_info_current()
-            let usageResult = withUnsafeMutablePointer(to: &usage) { pointer in
-                pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
-                    proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, rebound)
-                }
-            }
-            if usageResult == 0 {
-                total += usage.ri_neural_footprint
-                peak = max(peak, usage.ri_interval_max_neural_footprint)
-            }
-        }
-        return SystemMonitor.NeuralUsageTotals(currentBytes: total, intervalPeakBytes: peak)
-    }
-
     static func listPIDs() -> [Int32] {
         let bufferSize = proc_listallpids(nil, 0)
         guard bufferSize > 0 else { return [] }
@@ -4678,7 +4700,8 @@ private enum MonitorProbe {
         for pid in listPIDs() {
             var nameBuffer = Array(repeating: CChar(0), count: Int(MAXPATHLEN))
             let named = proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
-            guard named > 0, String(cString: nameBuffer) == "loginwindow" else { continue }
+            let name = String(decoding: nameBuffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            guard named > 0, name == "loginwindow" else { continue }
 
             var bsdInfo = proc_bsdinfo()
             let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
@@ -4749,7 +4772,7 @@ private enum MonitorProbe {
         return "Metal"
     }
 
-    static func resolvedGPUType(device: any MTLDevice, profilerItem: [String: Any]?, language: AppLanguage) -> String {
+    static func resolvedGPUType(device: any MTLDevice, busRaw: String?, language: AppLanguage) -> String {
         if #available(macOS 10.15, *) {
             switch device.location {
             case .builtIn:
@@ -4761,7 +4784,7 @@ private enum MonitorProbe {
             }
         }
 
-        if let bus = profilerItem?["sppci_bus"] as? String {
+        if let bus = busRaw {
             return bus == "spdisplays_builtin"
                 ? language.text("内建", "Internal")
                 : language.text("外建", "External")
