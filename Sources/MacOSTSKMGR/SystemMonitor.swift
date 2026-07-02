@@ -3782,30 +3782,14 @@ private enum MonitorProbe {
             result[name, default: []].append(app.processIdentifier)
         }
 
-        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
-        guard let header = lines.first else { return result }
-        let columns = header.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-        guard
-            let bytesInIndex = columns.firstIndex(of: "bytes_in"),
-            let bytesOutIndex = columns.firstIndex(of: "bytes_out")
-        else {
-            return result
-        }
-
-        for line in lines.dropFirst() {
-            let parts = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-            guard parts.count > max(bytesInIndex, bytesOutIndex) else { continue }
-
-            let processToken = parts[1]
-            let bytesIn = UInt64(parts[bytesInIndex]) ?? 0
-            let bytesOut = UInt64(parts[bytesOutIndex]) ?? 0
-            let total = bytesIn + bytesOut
-
-            if let dotIndex = processToken.lastIndex(of: "."),
-               let pid = Int32(processToken[processToken.index(after: dotIndex)...]) {
-                result[pid] = total
-            } else if let pids = pidsByName[processToken], pids.count == 1, let pid = pids.first {
-                result[pid] = total
+        for traffic in NettopParsing.processTraffic(fromCSV: text) {
+            let token = NettopParsing.splitToken(traffic.token)
+            if let pid = token.pid {
+                result[pid] = traffic.totalBytes
+            } else if let pids = pidsByName[token.name], pids.count == 1, let pid = pids.first {
+                // No pid in the token: attribute by app name, but only when the
+                // name is unambiguous.
+                result[pid] = traffic.totalBytes
             }
         }
         return result
@@ -4226,42 +4210,12 @@ private enum MonitorProbe {
             return []
         }
 
-        var result: [SystemMonitor.LaunchdRuntimeEntry] = []
-        var inServicesBlock = false
-
-        for line in text.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed == "services = {" {
-                inServicesBlock = true
-                continue
-            }
-            if inServicesBlock, trimmed == "}" {
-                break
-            }
-            guard inServicesBlock else { continue }
-
-            let parts = trimmed.split(whereSeparator: \.isWhitespace)
-            guard parts.count >= 3 else { continue }
-
-            let label = String(parts.last!)
-            guard shouldIncludeServiceLabel(label) else { continue }
-
-            let pidToken = String(parts[0])
-            let stateToken = String(parts[1])
-            let pid: Int32?
-            if let value = Int32(pidToken), value > 0 {
-                pid = value
-            } else {
-                pid = nil
-            }
-
-            result.append(
-                SystemMonitor.LaunchdRuntimeEntry(
-                    label: label,
-                    pid: pid,
-                    stateToken: stateToken,
-                    group: group
-                )
+        let result = LaunchdParsing.parseServicesBlock(text).map { entry in
+            SystemMonitor.LaunchdRuntimeEntry(
+                label: entry.label,
+                pid: entry.pid,
+                stateToken: entry.stateToken,
+                group: group
             )
         }
 
@@ -4351,10 +4305,7 @@ private enum MonitorProbe {
     }
 
     static func shouldIncludeServiceLabel(_ label: String) -> Bool {
-        guard !label.isEmpty else { return false }
-        if label.hasPrefix("application.") { return false }
-        if label.hasPrefix("com.apple.xpc.") { return false }
-        return true
+        LaunchdParsing.shouldIncludeServiceLabel(label)
     }
 
     static func serviceExecutableName(fromProgramPath program: String) -> String {
@@ -4457,9 +4408,7 @@ private enum MonitorProbe {
             let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, infoSize) == infoSize else { continue }
             let started = Double(bsdInfo.pbi_start_tvsec) + Double(bsdInfo.pbi_start_tvusec) / 1_000_000
-            let duration = started - boot
-            guard duration > 0, duration < 3600 else { return nil }
-            return duration
+            return BootMath.bootToLoginDurationSeconds(bootTime: boot, loginwindowStart: started)
         }
         return nil
     }
