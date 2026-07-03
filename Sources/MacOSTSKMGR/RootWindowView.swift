@@ -414,6 +414,9 @@ struct RootWindowView: View {
                 }
                 checkableMenuItem(language.text("菜单栏监视器(M)", "Menu bar monitor(M)"), checked: showMenuBarExtra) {
                     showMenuBarExtra.toggle()
+                    // @AppStorage has already written UserDefaults; tell the
+                    // AppDelegate to install/remove its NSStatusItem.
+                    NotificationCenter.default.post(name: .menuBarMonitorPreferenceChanged, object: nil)
                     activeMenu = nil
                 }
                 Divider()

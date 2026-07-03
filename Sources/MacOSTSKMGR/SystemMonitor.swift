@@ -682,6 +682,9 @@ final class SystemMonitor: ObservableObject {
     @Published var language: AppLanguage = .chinese
     @Published var temperatureUnit: TemperatureUnit = .celsius
     @Published private(set) var cpu = CPUState()
+    /// Publisher for the CPU state, so the AppKit menu-bar item can update its
+    /// title without observing the whole object.
+    var cpuStatePublisher: AnyPublisher<CPUState, Never> { $cpu.eraseToAnyPublisher() }
     @Published private(set) var memory = MemoryState()
     @Published private(set) var thermal = ThermalState()
     @Published private(set) var battery = BatteryState()
