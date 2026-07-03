@@ -157,18 +157,17 @@ struct StartupPageView: View {
     }
 
     private func toggleSystemStartupItem(path: String, label: String, enable: Bool) {
-        // The label lands on the shell command line, so restrict it to reverse-DNS
-        // characters; the path is passed through AppleScript's `quoted form of`.
+        // Label and path travel as osascript argv and are inserted with
+        // `quoted form of`, so arbitrary characters (spaces, quotes) are safe.
         // Never interpolate either into the script source (shell-injection risk).
-        let allowedLabelCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
-        guard !label.isEmpty, label.unicodeScalars.allSatisfy({ allowedLabelCharacters.contains($0) }) else { return }
+        guard !label.isEmpty else { return }
         let script = """
         on run argv
             set verb to item 1 of argv
             set theLabel to item 2 of argv
             set plistFlag to item 3 of argv
             set thePath to item 4 of argv
-            do shell script "/bin/launchctl " & verb & " system/" & theLabel & "; /usr/bin/plutil -replace Disabled -bool " & plistFlag & " " & quoted form of thePath with administrator privileges
+            do shell script "/bin/launchctl " & verb & " " & quoted form of ("system/" & theLabel) & "; /usr/bin/plutil -replace Disabled -bool " & plistFlag & " " & quoted form of thePath with administrator privileges
         end run
         """
         let process = Process()

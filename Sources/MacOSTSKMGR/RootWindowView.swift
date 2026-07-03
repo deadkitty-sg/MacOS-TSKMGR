@@ -23,7 +23,10 @@ struct RootWindowView: View {
     @AppStorage("pref.temperatureUnit") private var temperatureUnit: TemperatureUnit = .celsius
     @State private var selectedTab: TaskTab = .processes
     @State private var selectedPerf: PerfSelection = .cpu
-    @AppStorage("pref.performance.viewMode") private var performanceViewMode: PerformanceViewMode = .full
+    // Deliberately NOT persisted: leaving the Performance tab (or compact mode)
+    // resets summary modes to .full by design, so a persisted value would be
+    // wiped before it could ever be seen.
+    @State private var performanceViewMode: PerformanceViewMode = .full
     @State private var showsPerformanceGraphs = true
     @State private var cpuGraphMode: CPUGraphMode = .logicalProcessors
     @State private var gpuGraphLayoutMode: GPUGraphLayoutMode = .multiEngine
@@ -918,30 +921,41 @@ struct RootWindowView: View {
     }
 
     private func setProcessPriority(pid: Int32, preset: ProcessPriorityPreset) {
-        let process = Process()
-        if preset.niceValue < 0 {
-            // Raising priority (negative nice) requires root, so prompt for admin
-            // rights instead of silently failing. Only integers are interpolated,
-            // so the embedded shell command cannot be escaped.
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = [
-                "-e",
-                "do shell script \"/usr/bin/renice -n \(preset.niceValue) -p \(pid)\" with administrator privileges"
-            ]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/renice")
-            process.arguments = ["-n", "\(preset.niceValue)", "-p", "\(pid)"]
-        }
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                taskActionErrorMessage = "Unable to change the process priority."
+        let niceValue = preset.niceValue
+        let monitor = self.monitor
+        // Must run off the main thread: the admin-privileges path blocks in
+        // waitUntilExit until the SecurityAgent password dialog is dismissed,
+        // which can be an unbounded wait.
+        Task.detached(priority: .userInitiated) {
+            let process = Process()
+            if niceValue < 0 {
+                // Raising priority (negative nice) requires root, so prompt for
+                // admin rights instead of silently failing. Only integers are
+                // interpolated, so the embedded shell command cannot be escaped.
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                process.arguments = [
+                    "-e",
+                    "do shell script \"/usr/bin/renice -n \(niceValue) -p \(pid)\" with administrator privileges"
+                ]
+            } else {
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/renice")
+                process.arguments = ["-n", "\(niceValue)", "-p", "\(pid)"]
             }
-        } catch {
-            taskActionErrorMessage = "Unable to change the process priority."
+            var failed = false
+            do {
+                try process.run()
+                process.waitUntilExit()
+                failed = process.terminationStatus != 0
+            } catch {
+                failed = true
+            }
+            await MainActor.run {
+                if failed {
+                    taskActionErrorMessage = "Unable to change the process priority."
+                }
+                monitor.refreshNow()
+            }
         }
-        monitor.refreshNow()
     }
 
     private func canTerminate(pid: Int32) -> Bool {

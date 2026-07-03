@@ -712,6 +712,7 @@ final class SystemMonitor: ObservableObject {
     private var previousProcessNetworkTotals: [Int32: UInt64] = [:]
     private var previousSwapIns: UInt64 = 0
     private var previousSwapOuts: UInt64 = 0
+    private var lastProcessNetworkApplyDate: Date = .distantPast
     private var previousProcessMeteredNetworkTotals: [Int32: UInt64] = [:]
     private var appHistoryCPUBaseline: [Int32: Double] = [:]
     private var appHistoryNetworkBaseline: [Int32: UInt64] = [:]
@@ -1146,6 +1147,16 @@ final class SystemMonitor: ObservableObject {
             let totals = MonitorProbe.collectProcessNetworkSnapshot(interfaceFilter: nil)
             let meteredTotals = includeMetered ? MonitorProbe.collectProcessNetworkSnapshot(interfaceFilter: "expensive") : nil
             await MainActor.run {
+                let applyDate = Date()
+                // After a gap (the probe is page-gated off while other tabs are
+                // visible), the counters accumulated the whole gap's traffic.
+                // Reset the delta baseline so that backlog doesn't render as an
+                // absurd one-tick rate spike when the user returns.
+                let staleness = max((self.refreshSpeed.interval ?? 1.0) * 3, 3.0)
+                if applyDate.timeIntervalSince(self.lastProcessNetworkApplyDate) > staleness {
+                    self.previousProcessNetworkTotals = totals
+                }
+                self.lastProcessNetworkApplyDate = applyDate
                 self.processNetworkTotals = totals
                 if let meteredTotals {
                     self.meteredProcessNetworkTotals = meteredTotals
